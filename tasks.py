@@ -125,13 +125,7 @@ def schedule_poll(
             poll_number,
         ),
         job_id=f"real_to_render_poll_{log_id}_{poll_number}",
-        job_timeout=max(
-            60,
-            settings.provider_connect_timeout
-            + settings.provider_read_timeout
-            + settings.image_download_timeout
-            + 25,
-        ),
+        job_timeout=settings.job_timeout,
         retry=None,
         on_failure=Callback(
             "tasks.real_to_render_job_failure",

@@ -50,6 +50,7 @@ class Settings:
     image_download_timeout: int
     poll_interval: int
     max_wait: int
+    job_timeout: int
     state_ttl: int
     pipeline_version: str
     template_paths: tuple[Path, ...]
@@ -117,6 +118,10 @@ def get_settings() -> Settings:
             "REAL_TO_RENDER_POLL_INTERVAL_SECONDS", 10
         ),
         max_wait=_positive_int("REAL_TO_RENDER_MAX_WAIT_SECONDS", 320),
+        job_timeout=_positive_int(
+            "REAL_TO_RENDER_JOB_TIMEOUT_SECONDS",
+            320,
+        ),
         state_ttl=_positive_int("REAL_TO_RENDER_STATE_TTL_SECONDS", 86400),
         pipeline_version=os.getenv(
             "REAL_TO_RENDER_PIPELINE_VERSION",

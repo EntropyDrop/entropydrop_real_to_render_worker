@@ -27,6 +27,8 @@ adds a positive `CreditLog(action="refund")`.
 - Provider moderation failures: fail once, no retry.
 - Provider or download HTTP timeout: fail once, no retry.
 - Overall stage-1 timeout (default 320 seconds): fail once, no retry.
+- Each scheduled poll RQ execution has a 320-second hard timeout, configured
+  by `REAL_TO_RENDER_JOB_TIMEOUT_SECONDS`.
 - S3 or handoff error: fail once, no retry.
 - Every sample RQ job is enqueued with `retry=None`.
 

@@ -88,3 +88,41 @@ def test_stage_timeout_does_not_query_or_reschedule(monkeypatch):
 
     assert len(failures) == 1
     assert failures[0][1]["failure_reason"] == "timeout"
+
+
+def test_poll_job_uses_configured_hard_timeout(monkeypatch):
+    captured = {}
+
+    class FakeQueue:
+        def __init__(self, name, connection=None):
+            captured["name"] = name
+
+        def enqueue_in(self, delay, task, **kwargs):
+            captured["delay"] = delay
+            captured["task"] = task
+            captured.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(
+            poll_interval=10,
+            job_timeout=320,
+        ),
+    )
+    monkeypatch.setattr(tasks, "Queue", FakeQueue)
+    monkeypatch.setattr(tasks, "redis_connection", lambda: object())
+
+    tasks.schedule_poll(
+        log_id="log-timeout",
+        is_public=True,
+        provider_task_id="provider-timeout",
+        submitted_at=0.0,
+        queue_prefix="",
+        poll_number=1,
+    )
+
+    assert captured["name"] == "queue_real_to_render"
+    assert captured["task"] == "tasks.poll_real_to_render"
+    assert captured["job_timeout"] == 320
