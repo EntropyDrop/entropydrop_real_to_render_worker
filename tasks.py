@@ -43,6 +43,7 @@ def provider_client() -> RealToRenderProvider:
         connect_timeout=settings.provider_connect_timeout,
         read_timeout=settings.provider_read_timeout,
         download_timeout=settings.image_download_timeout,
+        proxy_url=settings.outbound_http_proxy,
     )
 
 
@@ -55,6 +56,7 @@ def object_storage() -> ObjectStorage:
         region=settings.aws_region,
         public_bucket=settings.public_bucket,
         private_bucket=settings.private_bucket,
+        proxy_url=settings.outbound_http_proxy,
     )
 
 

@@ -74,6 +74,7 @@ class RealToRenderProvider:
         connect_timeout: int,
         read_timeout: int,
         download_timeout: int,
+        proxy_url: str | None = None,
         session: requests.Session | None = None,
     ):
         self.base_url = base_url.rstrip("/")
@@ -81,6 +82,11 @@ class RealToRenderProvider:
         self.timeout = (connect_timeout, read_timeout)
         self.download_timeout = (connect_timeout, download_timeout)
         self.session = session or requests.Session()
+        self.proxies = (
+            {"http": proxy_url, "https": proxy_url}
+            if proxy_url
+            else None
+        )
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -105,6 +111,7 @@ class RealToRenderProvider:
                 "images": images,
             },
             timeout=self.timeout,
+            proxies=self.proxies,
         )
         response.raise_for_status()
         task_id = str(response.json().get("id") or "").strip()
@@ -120,6 +127,7 @@ class RealToRenderProvider:
             headers={"Authorization": self.headers["Authorization"]},
             params={"id": task_id},
             timeout=self.timeout,
+            proxies=self.proxies,
         )
         response.raise_for_status()
         return ProviderStatus.from_payload(
@@ -130,6 +138,7 @@ class RealToRenderProvider:
         response = self.session.get(
             url,
             timeout=self.download_timeout,
+            proxies=self.proxies,
         )
         response.raise_for_status()
         return response.content

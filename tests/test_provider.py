@@ -1,6 +1,11 @@
 import pytest
+import requests
 
-from provider import ProviderProtocolError, ProviderStatus
+from provider import (
+    ProviderProtocolError,
+    ProviderStatus,
+    RealToRenderProvider,
+)
 
 
 def test_parses_documented_success_response():
@@ -64,3 +69,22 @@ def test_unknown_status_is_terminal_protocol_error():
                 "status": "queued-forever",
             }
         )
+
+
+def test_configures_explicit_proxy_for_provider_and_downloads():
+    session = requests.Session()
+    provider = RealToRenderProvider(
+        base_url="https://provider.example",
+        api_key="secret",
+        model="model",
+        connect_timeout=5,
+        read_timeout=20,
+        download_timeout=30,
+        proxy_url="http://proxy:9100",
+        session=session,
+    )
+
+    assert provider.proxies == {
+        "http": "http://proxy:9100",
+        "https": "http://proxy:9100",
+    }

@@ -74,6 +74,39 @@ python -m venv .venv
 Scale concurrency by running 2-4 worker processes/containers. Do not add a
 thread pool to the FastAPI process or GPU process.
 
+## HTTP proxy and Redis
+
+`OUTBOUND_HTTP_PROXY` is used for all stage-1 HTTP traffic:
+
+- provider submit and poll requests;
+- downloading the provider result image;
+- S3 uploads and downloads.
+
+For a proxy listening on the Docker host:
+
+```dotenv
+OUTBOUND_HTTP_PROXY=http://host.docker.internal:9100
+REDIS_URL=redis://:replace-me@host.docker.internal:6380/0
+```
+
+The second line is not an HTTP proxy setting. Redis uses its own TCP protocol,
+so `REDIS_URL` must point to Redis directly or to a local TCP forward like the
+GPU worker's `autossh -L` tunnel. On Linux Docker, add
+`host.docker.internal:host-gateway` to the container if that hostname is not
+already available.
+
+When the HTTP proxy and Redis tunnel run as sidecars in the same Compose
+network, use service names instead:
+
+```dotenv
+OUTBOUND_HTTP_PROXY=http://http-proxy:9100
+REDIS_URL=redis://:replace-me@redis-tunnel:6380/0
+```
+
+Do not put credentials directly in the committed `.env.example`; inject the
+real proxy URL, Redis URL, and AWS credentials through the deployment secret
+store.
+
 ## Backend enqueue contract
 
 The eventual backend branch for the new model should enqueue:

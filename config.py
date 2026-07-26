@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -24,9 +25,22 @@ def _required(name: str) -> str:
     return value
 
 
+def _optional_http_url(name: str) -> str | None:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return None
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(
+            f"{name} must be an http:// or https:// proxy URL"
+        )
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     redis_url: str
+    outbound_http_proxy: str | None
     result_queue_key: str
     provider_base_url: str
     provider_api_key: str
@@ -83,6 +97,7 @@ def get_settings() -> Settings:
 
     return Settings(
         redis_url=_required("REDIS_URL"),
+        outbound_http_proxy=_optional_http_url("OUTBOUND_HTTP_PROXY"),
         result_queue_key=os.getenv(
             "GENERATE_RESULT_QUEUE_KEY", "generate_results"
         ),
