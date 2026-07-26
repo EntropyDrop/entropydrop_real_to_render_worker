@@ -1,0 +1,6 @@
+boto3>=1.34,<2
+Pillow>=10,<13
+python-dotenv>=1,<2
+redis>=5,<8
+requests>=2.31,<3
+rq>=2.2,<3

@@ -1,0 +1,66 @@
+import pytest
+
+from provider import ProviderProtocolError, ProviderStatus
+
+
+def test_parses_documented_success_response():
+    status = ProviderStatus.from_payload(
+        {
+            "id": "task-1",
+            "results": [
+                {
+                    "url": "https://example.com/result.png",
+                    "content": "description",
+                }
+            ],
+            "progress": 100,
+            "status": "succeeded",
+            "failure_reason": "",
+            "error": "",
+        }
+    )
+
+    assert status.task_id == "task-1"
+    assert status.status == "succeeded"
+    assert status.progress == 100
+    assert status.result_url == "https://example.com/result.png"
+
+
+def test_parses_documented_failure_response_without_retry_signal():
+    status = ProviderStatus.from_payload(
+        {
+            "id": "task-2",
+            "results": [],
+            "progress": 20,
+            "status": "failed",
+            "failure_reason": "error",
+            "error": "Invalid input parameters",
+        }
+    )
+
+    assert status.status == "failed"
+    assert status.failure_reason == "error"
+    assert status.error == "Invalid input parameters"
+
+
+def test_success_requires_result_url():
+    with pytest.raises(ProviderProtocolError):
+        ProviderStatus.from_payload(
+            {
+                "id": "task-3",
+                "results": [],
+                "progress": 100,
+                "status": "succeeded",
+            }
+        )
+
+
+def test_unknown_status_is_terminal_protocol_error():
+    with pytest.raises(ProviderProtocolError):
+        ProviderStatus.from_payload(
+            {
+                "id": "task-4",
+                "progress": 50,
+                "status": "queued-forever",
+            }
+        )
