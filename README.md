@@ -78,16 +78,20 @@ thread pool to the FastAPI process or GPU process.
 
 ## HTTP proxy and Redis
 
-`OUTBOUND_HTTP_PROXY` is used for all stage-1 HTTP traffic:
+By default, requests to `IMAGE_API_BASE_URL` are sent directly:
 
-- provider submit and poll requests;
-- downloading the provider result image;
-- S3 uploads and downloads.
+- `IMAGE_API_USE_PROXY=false`: provider submit and poll requests bypass the
+  proxy;
+- `OUTBOUND_HTTP_PROXY`: provider result-image downloads and S3 traffic use
+  this proxy;
+- set `IMAGE_API_USE_PROXY=true` only when provider submit and poll requests
+  should also use `OUTBOUND_HTTP_PROXY`.
 
 For a proxy listening on the Docker host:
 
 ```dotenv
 OUTBOUND_HTTP_PROXY=http://host.docker.internal:9100
+IMAGE_API_USE_PROXY=false
 REDIS_URL=redis://:replace-me@host.docker.internal:6380/0
 ```
 
@@ -102,6 +106,7 @@ network, use service names instead:
 
 ```dotenv
 OUTBOUND_HTTP_PROXY=http://http-proxy:9100
+IMAGE_API_USE_PROXY=false
 REDIS_URL=redis://:replace-me@redis-tunnel:6380/0
 ```
 

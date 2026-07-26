@@ -18,6 +18,17 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "true" if default else "false").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be one of true/false, 1/0, yes/no, or on/off"
+    )
+
+
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -43,6 +54,7 @@ class Settings:
     outbound_http_proxy: str | None
     result_queue_key: str
     provider_base_url: str
+    provider_use_proxy: bool
     provider_api_key: str
     provider_model: str
     provider_connect_timeout: int
@@ -103,6 +115,7 @@ def get_settings() -> Settings:
             "GENERATE_RESULT_QUEUE_KEY", "generate_results"
         ),
         provider_base_url=_required("IMAGE_API_BASE_URL").rstrip("/"),
+        provider_use_proxy=_bool("IMAGE_API_USE_PROXY", False),
         provider_api_key=_required("IMAGE_API_KEY"),
         provider_model=os.getenv("IMAGE_API_MODEL", "nano-banana-pro"),
         provider_connect_timeout=_positive_int(

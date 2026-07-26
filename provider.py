@@ -75,6 +75,7 @@ class RealToRenderProvider:
         read_timeout: int,
         download_timeout: int,
         proxy_url: str | None = None,
+        api_use_proxy: bool = False,
         session: requests.Session | None = None,
     ):
         self.base_url = base_url.rstrip("/")
@@ -82,11 +83,15 @@ class RealToRenderProvider:
         self.timeout = (connect_timeout, read_timeout)
         self.download_timeout = (connect_timeout, download_timeout)
         self.session = session or requests.Session()
+        # Do not implicitly inherit HTTP_PROXY/HTTPS_PROXY from the process.
+        # Every proxied request in this worker must opt in explicitly below.
+        self.session.trust_env = False
         self.proxies = (
             {"http": proxy_url, "https": proxy_url}
             if proxy_url
             else None
         )
+        self.api_proxies = self.proxies if api_use_proxy else None
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -111,7 +116,7 @@ class RealToRenderProvider:
                 "images": images,
             },
             timeout=self.timeout,
-            proxies=self.proxies,
+            proxies=self.api_proxies,
         )
         response.raise_for_status()
         task_id = str(response.json().get("id") or "").strip()
@@ -127,7 +132,7 @@ class RealToRenderProvider:
             headers={"Authorization": self.headers["Authorization"]},
             params={"id": task_id},
             timeout=self.timeout,
-            proxies=self.proxies,
+            proxies=self.api_proxies,
         )
         response.raise_for_status()
         return ProviderStatus.from_payload(

@@ -44,6 +44,7 @@ def provider_client() -> RealToRenderProvider:
         read_timeout=settings.provider_read_timeout,
         download_timeout=settings.image_download_timeout,
         proxy_url=settings.outbound_http_proxy,
+        api_use_proxy=settings.provider_use_proxy,
     )
 
 
