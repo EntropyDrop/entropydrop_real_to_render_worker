@@ -31,7 +31,7 @@ def test_timed_step_logs_duration_size_and_outcome(monkeypatch):
     )
 
     with tasks.timed_step("s3_download", "log-timing") as timing:
-        timing["size_bytes"] = 2048
+        timing["size_mb"] = tasks.size_mb(2 * 1024 * 1024)
 
     payload = json.loads(messages[0])
     assert payload == {
@@ -39,8 +39,8 @@ def test_timed_step_logs_duration_size_and_outcome(monkeypatch):
         "stage": "real_to_render",
         "step": "s3_download",
         "log_id": "log-timing",
-        "duration_ms": 125.0,
-        "size_bytes": 2048,
+        "duration_seconds": 0.125,
+        "size_mb": 2.0,
         "outcome": "succeeded",
     }
 
@@ -60,7 +60,7 @@ def test_timed_step_logs_failed_operation(monkeypatch):
             raise TimeoutError("request timed out")
 
     payload = json.loads(messages[0])
-    assert payload["duration_ms"] == 250.0
+    assert payload["duration_seconds"] == 0.25
     assert payload["outcome"] == "failed"
     assert payload["error_type"] == "TimeoutError"
 

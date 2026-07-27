@@ -23,7 +23,12 @@ from storage import ObjectStorage
 
 
 STAGE = "real_to_render"
+BYTES_PER_MB = 1024 * 1024
 logger = logging.getLogger("rq.job")
+
+
+def size_mb(byte_count: int) -> float:
+    return round(byte_count / BYTES_PER_MB, 3)
 
 
 @contextmanager
@@ -49,9 +54,9 @@ def timed_step(
             "stage": STAGE,
             "step": step,
             "log_id": log_id,
-            "duration_ms": round(
-                (time.perf_counter() - started_at) * 1000,
-                2,
+            "duration_seconds": round(
+                time.perf_counter() - started_at,
+                3,
             ),
             **fields,
         }
@@ -259,7 +264,7 @@ def submit_real_to_render(
             storage_scope="public" if is_public else "private",
         ) as timing:
             source_content = object_storage().download(source, is_public)
-            timing["size_bytes"] = len(source_content)
+            timing["size_mb"] = size_mb(len(source_content))
 
         with timed_step(
             "prepare_api_request",
@@ -415,14 +420,14 @@ def poll_real_to_render(
             raw_result = provider_client().download_result(
                 status.result_url
             )
-            timing["size_bytes"] = len(raw_result)
+            timing["size_mb"] = size_mb(len(raw_result))
 
         with timed_step("normalize_render", log_id) as timing:
             normalized_png, dimensions = normalize_combined_render(
                 raw_result
             )
-            timing["input_size_bytes"] = len(raw_result)
-            timing["output_size_bytes"] = len(normalized_png)
+            timing["input_size_mb"] = size_mb(len(raw_result))
+            timing["output_size_mb"] = size_mb(len(normalized_png))
             timing["width"] = dimensions[0]
             timing["height"] = dimensions[1]
         intermediate_key = (
@@ -432,7 +437,7 @@ def poll_real_to_render(
             "s3_upload",
             log_id,
             storage_scope="public" if is_public else "private",
-            size_bytes=len(normalized_png),
+            size_mb=size_mb(len(normalized_png)),
         ):
             object_storage().upload_png(
                 intermediate_key,

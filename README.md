@@ -117,8 +117,9 @@ store.
 ## Step timing logs
 
 Each stage-1 job emits one JSON log record per significant step. The record
-contains `log_id`, `step`, `duration_ms`, and `outcome`. File-transfer records
-also contain `size_bytes`; provider poll records contain `poll_number`,
+contains `log_id`, `step`, `duration_seconds`, and `outcome`. File-transfer
+records also contain `size_mb` (1 MB = 1024 x 1024 bytes); provider poll
+records contain `poll_number`,
 `provider_status`, and `provider_progress`.
 
 Logged steps are `s3_download`, `prepare_api_request`,
