@@ -1,4 +1,7 @@
+import json
 from types import SimpleNamespace
+
+import pytest
 
 import tasks
 from provider import ProviderStatus
@@ -15,6 +18,51 @@ class FailedProvider:
             failure_reason="error",
             error="provider error",
         )
+
+
+def test_timed_step_logs_duration_size_and_outcome(monkeypatch):
+    messages = []
+    clock = iter((10.0, 10.125))
+    monkeypatch.setattr(tasks.time, "perf_counter", lambda: next(clock))
+    monkeypatch.setattr(
+        tasks.logger,
+        "info",
+        lambda message: messages.append(message),
+    )
+
+    with tasks.timed_step("s3_download", "log-timing") as timing:
+        timing["size_bytes"] = 2048
+
+    payload = json.loads(messages[0])
+    assert payload == {
+        "event": "real_to_render_step",
+        "stage": "real_to_render",
+        "step": "s3_download",
+        "log_id": "log-timing",
+        "duration_ms": 125.0,
+        "size_bytes": 2048,
+        "outcome": "succeeded",
+    }
+
+
+def test_timed_step_logs_failed_operation(monkeypatch):
+    messages = []
+    clock = iter((20.0, 20.25))
+    monkeypatch.setattr(tasks.time, "perf_counter", lambda: next(clock))
+    monkeypatch.setattr(
+        tasks.logger,
+        "info",
+        lambda message: messages.append(message),
+    )
+
+    with pytest.raises(TimeoutError):
+        with tasks.timed_step("provider_submit_api", "log-error"):
+            raise TimeoutError("request timed out")
+
+    payload = json.loads(messages[0])
+    assert payload["duration_ms"] == 250.0
+    assert payload["outcome"] == "failed"
+    assert payload["error_type"] == "TimeoutError"
 
 
 def test_provider_failure_does_not_schedule_another_poll(monkeypatch):

@@ -1,8 +1,11 @@
 import json
+import logging
 import time
 import traceback
+from contextlib import contextmanager
 from datetime import timedelta
 from functools import lru_cache
+from typing import Iterator
 
 from redis import Redis
 from rq import Queue
@@ -20,6 +23,39 @@ from storage import ObjectStorage
 
 
 STAGE = "real_to_render"
+logger = logging.getLogger("rq.job")
+
+
+@contextmanager
+def timed_step(
+    step: str,
+    log_id: str,
+    **initial_fields,
+) -> Iterator[dict]:
+    """Log one JSON timing event on both success and failure."""
+    fields = dict(initial_fields)
+    started_at = time.perf_counter()
+    try:
+        yield fields
+    except Exception as exc:
+        fields["outcome"] = "failed"
+        fields["error_type"] = type(exc).__name__
+        raise
+    else:
+        fields["outcome"] = "succeeded"
+    finally:
+        payload = {
+            "event": "real_to_render_step",
+            "stage": STAGE,
+            "step": step,
+            "log_id": log_id,
+            "duration_ms": round(
+                (time.perf_counter() - started_at) * 1000,
+                2,
+            ),
+            **fields,
+        }
+        logger.info(json.dumps(payload, ensure_ascii=False))
 
 
 @lru_cache(maxsize=1)
@@ -217,25 +253,40 @@ def submit_real_to_render(
         settings = get_settings()
         report_status(log_id, "processing")
 
-        source_content = object_storage().download(source, is_public)
-        references = [
-            image_data_url(source_content, content_type),
-            *template_data_urls(settings.template_paths),
-        ]
-        template_refs = "".join(
-            f"[图{index}]"
-            for index in range(2, len(settings.template_paths) + 2)
-        )
-        prompt = settings.prompt_template.format(
-            template_refs=template_refs
-        )
+        with timed_step(
+            "s3_download",
+            log_id,
+            storage_scope="public" if is_public else "private",
+        ) as timing:
+            source_content = object_storage().download(source, is_public)
+            timing["size_bytes"] = len(source_content)
 
-        provider_task_id = provider_client().submit(
-            images=references,
-            prompt=prompt,
-            aspect_ratio=settings.aspect_ratio,
-            image_size=settings.image_size,
-        )
+        with timed_step(
+            "prepare_api_request",
+            log_id,
+            template_count=len(settings.template_paths),
+        ) as timing:
+            references = [
+                image_data_url(source_content, content_type),
+                *template_data_urls(settings.template_paths),
+            ]
+            template_refs = "".join(
+                f"[图{index}]"
+                for index in range(2, len(settings.template_paths) + 2)
+            )
+            prompt = settings.prompt_template.format(
+                template_refs=template_refs
+            )
+            timing["image_count"] = len(references)
+
+        with timed_step("provider_submit_api", log_id) as timing:
+            provider_task_id = provider_client().submit(
+                images=references,
+                prompt=prompt,
+                aspect_ratio=settings.aspect_ratio,
+                image_size=settings.image_size,
+            )
+            timing["provider_task_id"] = provider_task_id
         submitted_at = time.time()
         save_state(
             log_id,
@@ -318,7 +369,15 @@ def poll_real_to_render(
             )
             return
 
-        status = provider_client().get_status(provider_task_id)
+        with timed_step(
+            "provider_status_api",
+            log_id,
+            provider_task_id=provider_task_id,
+            poll_number=poll_number,
+        ) as timing:
+            status = provider_client().get_status(provider_task_id)
+            timing["provider_status"] = status.status
+            timing["provider_progress"] = status.progress
         save_state(
             log_id,
             provider_task_id=provider_task_id,
@@ -348,22 +407,45 @@ def poll_real_to_render(
             )
             return
 
-        raw_result = provider_client().download_result(status.result_url)
-        normalized_png, dimensions = normalize_combined_render(raw_result)
+        with timed_step(
+            "provider_result_download",
+            log_id,
+            provider_task_id=provider_task_id,
+        ) as timing:
+            raw_result = provider_client().download_result(
+                status.result_url
+            )
+            timing["size_bytes"] = len(raw_result)
+
+        with timed_step("normalize_render", log_id) as timing:
+            normalized_png, dimensions = normalize_combined_render(
+                raw_result
+            )
+            timing["input_size_bytes"] = len(raw_result)
+            timing["output_size_bytes"] = len(normalized_png)
+            timing["width"] = dimensions[0]
+            timing["height"] = dimensions[1]
         intermediate_key = (
             f"real_to_render_intermediate/{log_id}.png"
         )
-        object_storage().upload_png(
-            intermediate_key,
-            normalized_png,
-            is_public,
-        )
-        enqueue_render_to_uv_once(
-            log_id=log_id,
-            is_public=is_public,
-            intermediate_key=intermediate_key,
-            queue_prefix=queue_prefix,
-        )
+        with timed_step(
+            "s3_upload",
+            log_id,
+            storage_scope="public" if is_public else "private",
+            size_bytes=len(normalized_png),
+        ):
+            object_storage().upload_png(
+                intermediate_key,
+                normalized_png,
+                is_public,
+            )
+        with timed_step("enqueue_render_to_uv", log_id):
+            enqueue_render_to_uv_once(
+                log_id=log_id,
+                is_public=is_public,
+                intermediate_key=intermediate_key,
+                queue_prefix=queue_prefix,
+            )
         save_state(
             log_id,
             terminal_status="handed_off",

@@ -114,6 +114,18 @@ Do not put credentials directly in the committed `.env.example`; inject the
 real proxy URL, Redis URL, and AWS credentials through the deployment secret
 store.
 
+## Step timing logs
+
+Each stage-1 job emits one JSON log record per significant step. The record
+contains `log_id`, `step`, `duration_ms`, and `outcome`. File-transfer records
+also contain `size_bytes`; provider poll records contain `poll_number`,
+`provider_status`, and `provider_progress`.
+
+Logged steps are `s3_download`, `prepare_api_request`,
+`provider_submit_api`, `provider_status_api`, `provider_result_download`,
+`normalize_render`, `s3_upload`, and `enqueue_render_to_uv`. Signed URLs,
+credentials, prompts, and image contents are not logged.
+
 ## Backend enqueue contract
 
 The eventual backend branch for the new model should enqueue:
