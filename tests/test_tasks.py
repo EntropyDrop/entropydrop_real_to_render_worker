@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from rq.exceptions import NoSuchJobError
 
 import tasks
 from provider import ProviderStatus
@@ -161,6 +162,11 @@ def test_poll_job_uses_configured_hard_timeout(monkeypatch):
     )
     monkeypatch.setattr(tasks, "Queue", FakeQueue)
     monkeypatch.setattr(tasks, "redis_connection", lambda: object())
+    monkeypatch.setattr(
+        tasks.Job,
+        "fetch",
+        lambda *args, **kwargs: (_ for _ in ()).throw(NoSuchJobError),
+    )
 
     tasks.schedule_poll(
         log_id="log-timeout",
@@ -174,3 +180,66 @@ def test_poll_job_uses_configured_hard_timeout(monkeypatch):
     assert captured["name"] == "queue_real_to_render"
     assert captured["task"] == "tasks.poll_real_to_render"
     assert captured["job_timeout"] == 320
+
+
+def test_interrupted_submit_resumes_existing_provider_task(monkeypatch):
+    scheduled = []
+    reports = []
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "load_state",
+        lambda log_id: {
+            "provider_task_id": "provider-existing",
+            "submitted_at": "100.0",
+            "poll_number": "3",
+        },
+    )
+    monkeypatch.setattr(
+        tasks,
+        "schedule_poll",
+        lambda **kwargs: scheduled.append(kwargs),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "report_status",
+        lambda *args, **kwargs: reports.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "object_storage",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("resumed submit must not download from S3")
+        ),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "provider_client",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("resumed submit must not call provider submit")
+        ),
+    )
+
+    tasks.submit_real_to_render(
+        "log-resume",
+        True,
+        "uploads/log-resume.png",
+        "image/png",
+        "high_",
+    )
+
+    assert scheduled == [
+        {
+            "log_id": "log-resume",
+            "is_public": True,
+            "provider_task_id": "provider-existing",
+            "submitted_at": 100.0,
+            "queue_prefix": "high_",
+            "poll_number": 4,
+        }
+    ]
+    assert reports[-1][1]["provider_task_id"] == "provider-existing"

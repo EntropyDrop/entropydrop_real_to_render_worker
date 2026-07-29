@@ -127,6 +127,17 @@ Logged steps are `s3_download`, `prepare_api_request`,
 `normalize_render`, `s3_upload`, and `enqueue_render_to_uv`. Signed URLs,
 credentials, prompts, and image contents are not logged.
 
+## Restart recovery
+
+The worker checks the started registries at boot and every
+`REAL_TO_RENDER_RECOVERY_INTERVAL_SECONDS`. A job is requeued only when its
+recorded owner has stopped heartbeating for
+`REAL_TO_RENDER_ORPHAN_GRACE_SECONDS` (or has registered its death).
+
+Submission state is persisted before polling begins. If a recovered submit
+job already has a `provider_task_id`, it resumes polling that task instead of
+calling the provider submit API again.
+
 ## Backend enqueue contract
 
 The eventual backend branch for the new model should enqueue:

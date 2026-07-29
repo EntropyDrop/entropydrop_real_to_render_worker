@@ -1,9 +1,10 @@
 import sys
 
 from redis import Redis
-from rq import Queue, Worker
+from rq import Queue
 
 from config import get_settings
+from recovery import RecoveringWorker
 
 
 def main() -> None:
@@ -22,7 +23,14 @@ def main() -> None:
     )
     queues = [Queue(name, connection=connection) for name in names]
     print(f"[*] Stage-1 worker listening on: {names}")
-    Worker(queues, connection=connection).work(with_scheduler=True)
+    worker = RecoveringWorker(
+        queues,
+        connection=connection,
+        maintenance_interval=settings.recovery_interval,
+        orphan_grace_seconds=settings.orphan_grace,
+    )
+    worker.recover_interrupted_jobs()
+    worker.work(with_scheduler=True)
 
 
 if __name__ == "__main__":

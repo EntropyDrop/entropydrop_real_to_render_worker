@@ -64,6 +64,8 @@ class Settings:
     max_wait: int
     job_timeout: int
     state_ttl: int
+    recovery_interval: int
+    orphan_grace: int
     pipeline_version: str
     template_paths: tuple[Path, ...]
     prompt_file: Path | None
@@ -136,6 +138,14 @@ def get_settings() -> Settings:
             320,
         ),
         state_ttl=_positive_int("REAL_TO_RENDER_STATE_TTL_SECONDS", 86400),
+        recovery_interval=_positive_int(
+            "REAL_TO_RENDER_RECOVERY_INTERVAL_SECONDS",
+            15,
+        ),
+        orphan_grace=_positive_int(
+            "REAL_TO_RENDER_ORPHAN_GRACE_SECONDS",
+            75,
+        ),
         pipeline_version=os.getenv(
             "REAL_TO_RENDER_PIPELINE_VERSION",
             "real2render-t41-t51-t52-sking-ddj-v54-v1",

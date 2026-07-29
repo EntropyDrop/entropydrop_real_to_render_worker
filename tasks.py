@@ -136,6 +136,22 @@ def save_state(log_id: str, **fields) -> None:
     redis_connection().expire(key, settings.state_ttl)
 
 
+def load_state(log_id: str) -> dict[str, str]:
+    raw = redis_connection().hgetall(state_key(log_id))
+    return {
+        (
+            key.decode("utf-8")
+            if isinstance(key, bytes)
+            else str(key)
+        ): (
+            value.decode("utf-8")
+            if isinstance(value, bytes)
+            else str(value)
+        )
+        for key, value in raw.items()
+    }
+
+
 def queue_name(prefix: str, base: str) -> str:
     if prefix not in ("", "high_"):
         raise ValueError(f"Unsupported queue prefix: {prefix!r}")
@@ -151,6 +167,12 @@ def schedule_poll(
     poll_number: int,
 ) -> Job:
     settings = get_settings()
+    job_id = f"real_to_render_poll_{log_id}_{poll_number}"
+    try:
+        return Job.fetch(job_id, connection=redis_connection())
+    except NoSuchJobError:
+        pass
+
     queue = Queue(
         queue_name(queue_prefix, "queue_real_to_render"),
         connection=redis_connection(),
@@ -166,7 +188,7 @@ def schedule_poll(
             queue_prefix,
             poll_number,
         ),
-        job_id=f"real_to_render_poll_{log_id}_{poll_number}",
+        job_id=job_id,
         job_timeout=settings.job_timeout,
         retry=None,
         on_failure=Callback(
@@ -252,12 +274,49 @@ def submit_real_to_render(
     content_type: str = "image/png",
     queue_prefix: str = "",
 ) -> None:
-    """Submit exactly once. Any exception is terminal and is not retried."""
+    """Submit once, or resume polling when a prior submission was persisted."""
     provider_task_id = None
     try:
         settings = get_settings()
-        report_status(log_id, "processing")
 
+        existing_state = load_state(log_id)
+        terminal_status = existing_state.get("terminal_status")
+        if terminal_status:
+            logger.info(
+                "Skipping resumed submission for %s: terminal_status=%s",
+                log_id,
+                terminal_status,
+            )
+            return
+
+        provider_task_id = existing_state.get("provider_task_id")
+        if provider_task_id:
+            submitted_at = float(
+                existing_state.get("submitted_at") or time.time()
+            )
+            next_poll_number = (
+                int(existing_state.get("poll_number") or 0) + 1
+            )
+            schedule_poll(
+                log_id=log_id,
+                is_public=is_public,
+                provider_task_id=provider_task_id,
+                submitted_at=submitted_at,
+                queue_prefix=queue_prefix,
+                poll_number=next_poll_number,
+            )
+            report_status(
+                log_id,
+                "processing",
+                provider_task_id=provider_task_id,
+            )
+            logger.warning(
+                "Resumed provider polling for interrupted submission %s",
+                log_id,
+            )
+            return
+
+        report_status(log_id, "processing")
         with timed_step(
             "s3_download",
             log_id,
@@ -299,6 +358,7 @@ def submit_real_to_render(
             submitted_at=submitted_at,
             provider_status="running",
             progress=0,
+            poll_number=0,
         )
         schedule_poll(
             log_id=log_id,
@@ -389,6 +449,7 @@ def poll_real_to_render(
             provider_status=status.status,
             progress=status.progress,
             last_polled_at=time.time(),
+            poll_number=poll_number,
         )
 
         if status.status == "running":
