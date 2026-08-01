@@ -43,10 +43,29 @@ Each `poll_real_to_render` execution performs one GET and either:
 
 1. schedules another poll after `REAL_TO_RENDER_POLL_INTERVAL_SECONDS`;
 2. reports terminal failure; or
-3. uploads the result and hands off to `queue_render_to_uv`.
+3. validates the generated silhouette, uploads the result, and hands off to
+   `queue_render_to_uv`.
 
 The provider result URL is downloaded immediately because it is valid for only
 two hours.
+
+## Generated-shape validation
+
+Before upload and GPU handoff, the worker removes the provider image's
+pure-color background and compares its foreground silhouette with
+`masks/front_left_core_back_left_core.png`. The committed 1024x1024 black-on-
+white mask is generated horizontally from differentiable_minecraft_renderer's
+512x1024 `front_left_core` and `back_left_core` mappings. The foreground/mask
+intersection divided by the mask's black-pixel count must be strictly greater
+than 95%. Foreground outside the core mask, including the outer skin layer, is
+not penalized. Otherwise the stage fails with `error_msg="invalid shape"` and
+`failure_reason="invalid_shape"`.
+
+Regenerate the mask from a sibling renderer checkout with:
+
+```bash
+python scripts/generate_shape_mask.py
+```
 
 ## Templates, prompt, and pipeline version
 
@@ -124,8 +143,9 @@ records contain `poll_number`,
 
 Logged steps are `s3_download`, `prepare_api_request`,
 `provider_submit_api`, `provider_status_api`, `provider_result_download`,
-`normalize_render`, `s3_upload`, and `enqueue_render_to_uv`. Signed URLs,
-credentials, prompts, and image contents are not logged.
+`normalize_render`, `validate_shape`, `s3_upload`, and
+`enqueue_render_to_uv`. The validation record includes `overlap_ratio`.
+Signed URLs, credentials, prompts, and image contents are not logged.
 
 ## Restart recovery
 

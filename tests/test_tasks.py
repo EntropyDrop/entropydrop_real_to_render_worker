@@ -1,10 +1,13 @@
+import io
 import json
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 from rq.exceptions import NoSuchJobError
 
 import tasks
+from images import InvalidShapeError
 from provider import ProviderStatus
 
 
@@ -19,6 +22,27 @@ class FailedProvider:
             failure_reason="error",
             error="provider error",
         )
+
+
+class SucceededProvider:
+    def get_status(self, task_id):
+        return ProviderStatus(
+            task_id=task_id,
+            status="succeeded",
+            progress=100,
+            result_url="https://example.invalid/result.png",
+            content=None,
+            failure_reason=None,
+            error=None,
+        )
+
+    def download_result(self, result_url):
+        buffer = io.BytesIO()
+        Image.new("RGB", (1024, 1024), "white").save(
+            buffer,
+            format="PNG",
+        )
+        return buffer.getvalue()
 
 
 def test_timed_step_logs_duration_size_and_outcome(monkeypatch):
@@ -137,6 +161,53 @@ def test_stage_timeout_does_not_query_or_reschedule(monkeypatch):
 
     assert len(failures) == 1
     assert failures[0][1]["failure_reason"] == "timeout"
+
+
+def test_invalid_shape_fails_before_upload_and_handoff(monkeypatch):
+    failures = []
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(max_wait=320),
+    )
+    monkeypatch.setattr(tasks, "provider_client", lambda: SucceededProvider())
+    monkeypatch.setattr(tasks, "save_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        tasks,
+        "fail_stage",
+        lambda *args, **kwargs: failures.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "validate_combined_render_shape",
+        lambda content: (_ for _ in ()).throw(InvalidShapeError()),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "object_storage",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("invalid shape must not be uploaded")
+        ),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "enqueue_render_to_uv_once",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid shape must not be handed off")
+        ),
+    )
+    monkeypatch.setattr(tasks.time, "time", lambda: 100.0)
+
+    tasks.poll_real_to_render(
+        "log-invalid-shape",
+        True,
+        "provider-invalid-shape",
+        submitted_at=0.0,
+    )
+
+    assert len(failures) == 1
+    assert str(failures[0][0][1]) == "invalid shape"
+    assert failures[0][1]["failure_reason"] == "invalid_shape"
 
 
 def test_poll_job_uses_configured_hard_timeout(monkeypatch):

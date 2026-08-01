@@ -14,9 +14,11 @@ from rq.job import Callback, Job
 
 from config import get_settings
 from images import (
+    InvalidShapeError,
     image_data_url,
     normalize_combined_render,
     template_data_urls,
+    validate_combined_render_shape,
 )
 from provider import RealToRenderProvider
 from storage import ObjectStorage
@@ -491,6 +493,17 @@ def poll_real_to_render(
             timing["output_size_mb"] = size_mb(len(normalized_png))
             timing["width"] = dimensions[0]
             timing["height"] = dimensions[1]
+        with timed_step("validate_shape", log_id) as timing:
+            try:
+                overlap = validate_combined_render_shape(normalized_png)
+            except InvalidShapeError as exc:
+                if exc.overlap_ratio is not None:
+                    timing["overlap_ratio"] = round(
+                        exc.overlap_ratio,
+                        6,
+                    )
+                raise
+            timing["overlap_ratio"] = round(overlap, 6)
         intermediate_key = (
             f"real_to_render_intermediate/{log_id}.png"
         )
@@ -533,5 +546,9 @@ def poll_real_to_render(
             log_id,
             exc,
             provider_task_id=provider_task_id,
-            failure_reason="error",
+            failure_reason=(
+                "invalid_shape"
+                if isinstance(exc, InvalidShapeError)
+                else "error"
+            ),
         )
