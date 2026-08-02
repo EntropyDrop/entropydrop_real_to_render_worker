@@ -24,7 +24,7 @@ class InvalidShapeError(ValueError):
 
     def __init__(self, overlap_ratio: float | None = None) -> None:
         self.overlap_ratio = overlap_ratio
-        super().__init__("invalid shape")
+        super().__init__("INTERNAL_ERROR:invalid shape. Please try again")
 
 
 def image_data_url(content: bytes, content_type: str) -> str:
