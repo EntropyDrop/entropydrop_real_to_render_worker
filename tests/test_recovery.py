@@ -22,6 +22,7 @@ class FakeConnection:
 class FakePipeline:
     def __init__(self):
         self.executed = False
+        self.explicit_transaction = False
 
     def __enter__(self):
         return self
@@ -31,6 +32,9 @@ class FakePipeline:
 
     def execute(self):
         self.executed = True
+
+    def multi(self):
+        self.explicit_transaction = True
 
 
 def test_worker_owns_job_only_with_current_fresh_heartbeat():
@@ -83,6 +87,7 @@ def test_worker_death_marker_makes_started_job_recoverable():
 def test_requeue_interrupted_job_removes_execution_and_resets_job(monkeypatch):
     deleted = []
     enqueued = []
+    operations = []
 
     class FakeExecution:
         def __init__(self, id, job_id, connection):
@@ -90,10 +95,15 @@ def test_requeue_interrupted_job_removes_execution_and_resets_job(monkeypatch):
             self.job_id = job_id
 
         def delete(self, job, pipeline):
+            assert pipeline.explicit_transaction is True
+            operations.append("delete_execution")
             deleted.append((self.id, self.job_id, job.id))
 
     class FakeQueue:
         def enqueue_job(self, job, pipeline, at_front):
+            assert pipeline.explicit_transaction is False
+            pipeline.multi()
+            operations.append("enqueue_job")
             enqueued.append((job.id, at_front))
 
     monkeypatch.setattr(recovery, "Execution", FakeExecution)
@@ -117,6 +127,7 @@ def test_requeue_interrupted_job_removes_execution_and_resets_job(monkeypatch):
 
     assert deleted == [("execution-1", "job-1", "job-1")]
     assert enqueued == [("job-1", True)]
+    assert operations == ["enqueue_job", "delete_execution"]
     assert job._status == JobStatus.QUEUED
     assert job.worker_name is None
     assert job.started_at is None

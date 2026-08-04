@@ -72,8 +72,13 @@ def requeue_interrupted_job(
     job._cached_result = None
 
     with connection.pipeline() as pipeline:
-        execution.delete(job, pipeline)
+        # RQ initializes the supplied pipeline with MULTI from
+        # Queue.enqueue_job(). Redis-py rejects MULTI if commands were queued
+        # first, so the old execution must be deleted only after RQ has put
+        # the pipeline into transaction mode. Both operations are still
+        # committed atomically by the single execute() below.
         queue.enqueue_job(job, pipeline=pipeline, at_front=True)
+        execution.delete(job, pipeline)
         pipeline.execute()
 
 
