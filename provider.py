@@ -7,6 +7,9 @@ import requests
 TERMINAL_FAILURE_STATUSES = {"failed", "violation"}
 TERMINAL_STATUSES = {"succeeded"} | TERMINAL_FAILURE_STATUSES
 KNOWN_STATUSES = TERMINAL_STATUSES | {"running"}
+VIOLATION_ERROR_MESSAGE = (
+    "The image contains invalid or prohibited content."
+)
 
 
 class ProviderProtocolError(RuntimeError):

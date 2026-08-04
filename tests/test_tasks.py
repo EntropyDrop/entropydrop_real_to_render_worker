@@ -33,8 +33,8 @@ class ViolationProvider:
             progress=100,
             result_url=None,
             content=None,
-            failure_reason="",
-            error="",
+            failure_reason="third_party_policy_code",
+            error="Third-party refusal text must not be exposed",
         )
 
 
@@ -198,7 +198,9 @@ def test_provider_violation_stops_without_retrying(monkeypatch):
 
     assert len(failures) == 1
     assert failures[0][1]["failure_reason"] == "violation"
-    assert "violation" in failures[0][0][1]
+    assert failures[0][0][1] == (
+        "The image contains invalid or prohibited content."
+    )
     assert scheduled == []
 
 
