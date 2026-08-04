@@ -4,7 +4,8 @@ from typing import Any
 import requests
 
 
-TERMINAL_STATUSES = {"succeeded", "failed"}
+TERMINAL_FAILURE_STATUSES = {"failed", "violation"}
+TERMINAL_STATUSES = {"succeeded"} | TERMINAL_FAILURE_STATUSES
 KNOWN_STATUSES = TERMINAL_STATUSES | {"running"}
 
 

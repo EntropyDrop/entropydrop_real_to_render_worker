@@ -90,6 +90,23 @@ def test_parses_documented_failure_response_without_retry_signal():
     assert status.error == "Invalid input parameters"
 
 
+def test_parses_violation_as_terminal_failure():
+    status = ProviderStatus.from_payload(
+        {
+            "id": "task-violation",
+            "results": [],
+            "progress": 100,
+            "status": "violation",
+            "failure_reason": "content_policy_violation",
+            "error": "Content policy violation",
+        }
+    )
+
+    assert status.status == "violation"
+    assert status.failure_reason == "content_policy_violation"
+    assert status.result_url is None
+
+
 def test_success_requires_result_url():
     with pytest.raises(ProviderProtocolError):
         ProviderStatus.from_payload(

@@ -21,7 +21,7 @@ from images import (
     template_data_urls,
     validate_combined_render_shape,
 )
-from provider import RealToRenderProvider
+from provider import RealToRenderProvider, TERMINAL_FAILURE_STATUSES
 from storage import ObjectStorage
 
 
@@ -785,17 +785,19 @@ def poll_real_to_render(
                 )
                 return
 
-            if status.status == "failed":
+            if status.status in TERMINAL_FAILURE_STATUSES:
                 detail = (
                     status.error
                     or status.failure_reason
-                    or "Provider failed"
+                    or f"Provider stopped task with status {status.status!r}"
                 )
                 fail_stage(
                     log_id,
                     detail,
                     provider_task_id=provider_task_id,
-                    failure_reason=status.failure_reason or "error",
+                    failure_reason=(
+                        status.failure_reason or status.status or "error"
+                    ),
                 )
                 return
 

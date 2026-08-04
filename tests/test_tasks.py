@@ -25,6 +25,19 @@ class FailedProvider:
         )
 
 
+class ViolationProvider:
+    def get_status(self, task_id):
+        return ProviderStatus(
+            task_id=task_id,
+            status="violation",
+            progress=100,
+            result_url=None,
+            content=None,
+            failure_reason="",
+            error="",
+        )
+
+
 class SucceededProvider:
     def get_status(self, task_id):
         return ProviderStatus(
@@ -154,6 +167,38 @@ def test_provider_failure_does_not_schedule_another_poll(monkeypatch):
 
     assert len(failures) == 1
     assert failures[0][1]["failure_reason"] == "error"
+    assert scheduled == []
+
+
+def test_provider_violation_stops_without_retrying(monkeypatch):
+    failures = []
+    scheduled = []
+    monkeypatch.setattr(tasks, "get_settings", poll_settings)
+    monkeypatch.setattr(tasks, "load_state", lambda log_id: {})
+    monkeypatch.setattr(tasks, "provider_client", lambda: ViolationProvider())
+    monkeypatch.setattr(tasks, "save_state", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        tasks,
+        "fail_stage",
+        lambda *args, **kwargs: failures.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "schedule_poll",
+        lambda *args, **kwargs: scheduled.append((args, kwargs)),
+    )
+    monkeypatch.setattr(tasks.time, "time", lambda: 100.0)
+
+    tasks.poll_real_to_render(
+        "log-violation",
+        True,
+        "provider-violation",
+        submitted_at=0.0,
+    )
+
+    assert len(failures) == 1
+    assert failures[0][1]["failure_reason"] == "violation"
+    assert "violation" in failures[0][0][1]
     assert scheduled == []
 
 
