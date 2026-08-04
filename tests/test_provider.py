@@ -1,4 +1,5 @@
 import pytest
+import requests
 
 from provider import (
     ProviderProtocolError,
@@ -39,6 +40,14 @@ class RecordingSession:
                 }
             )
         return FakeResponse(content=b"result-image")
+
+
+class ProxyFailingSession(RecordingSession):
+    def get(self, url, **kwargs):
+        self.calls.append(("get", url, kwargs))
+        if kwargs.get("proxies") is not None:
+            raise requests.ReadTimeout("proxy stalled")
+        return FakeResponse(content=b"direct-result")
 
 
 def test_parses_documented_success_response():
@@ -146,3 +155,24 @@ def test_provider_api_can_explicitly_opt_in_to_proxy():
     )
 
     assert provider.api_proxies == provider.proxies
+
+
+def test_result_download_falls_back_from_proxy_to_direct():
+    session = ProxyFailingSession()
+    provider = RealToRenderProvider(
+        base_url="https://provider.example",
+        api_key="secret",
+        model="model",
+        connect_timeout=5,
+        read_timeout=20,
+        download_timeout=30,
+        proxy_url="http://proxy:9100",
+        download_direct_fallback=True,
+        session=session,
+    )
+
+    assert provider.download_result("https://cdn.example/result.png") == (
+        b"direct-result"
+    )
+    assert session.calls[0][2]["proxies"] == provider.proxies
+    assert session.calls[1][2]["proxies"] is None

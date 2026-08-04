@@ -76,6 +76,7 @@ class RealToRenderProvider:
         download_timeout: int,
         proxy_url: str | None = None,
         api_use_proxy: bool = False,
+        download_direct_fallback: bool = True,
         session: requests.Session | None = None,
     ):
         self.base_url = base_url.rstrip("/")
@@ -92,6 +93,7 @@ class RealToRenderProvider:
             else None
         )
         self.api_proxies = self.proxies if api_use_proxy else None
+        self.download_direct_fallback = download_direct_fallback
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -140,10 +142,22 @@ class RealToRenderProvider:
         )
 
     def download_result(self, url: str) -> bytes:
-        response = self.session.get(
-            url,
-            timeout=self.download_timeout,
-            proxies=self.proxies,
-        )
-        response.raise_for_status()
-        return response.content
+        routes = [self.proxies]
+        if self.proxies and self.download_direct_fallback:
+            routes.append(None)
+
+        last_error: requests.RequestException | None = None
+        for proxies in routes:
+            try:
+                response = self.session.get(
+                    url,
+                    timeout=self.download_timeout,
+                    proxies=proxies,
+                )
+                response.raise_for_status()
+                return response.content
+            except requests.RequestException as exc:
+                last_error = exc
+
+        assert last_error is not None
+        raise last_error

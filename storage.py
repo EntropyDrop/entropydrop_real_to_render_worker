@@ -18,7 +18,7 @@ class ObjectStorage:
             "connect_timeout": 5,
             "read_timeout": 20,
             "retries": {
-                "total_max_attempts": 1,
+                "total_max_attempts": 3,
                 "mode": "standard",
             },
         }

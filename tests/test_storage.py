@@ -25,3 +25,4 @@ def test_configures_explicit_proxy_for_s3(monkeypatch):
         "http": "http://proxy:9100",
         "https": "http://proxy:9100",
     }
+    assert captured["config"].retries["total_max_attempts"] == 3

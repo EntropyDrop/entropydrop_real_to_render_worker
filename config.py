@@ -18,6 +18,17 @@ def _positive_int(name: str, default: int) -> int:
     return value
 
 
+def _positive_int_tuple(
+    name: str,
+    default: tuple[int, ...],
+) -> tuple[int, ...]:
+    raw = os.getenv(name, ",".join(str(value) for value in default))
+    values = tuple(int(item.strip()) for item in raw.split(",") if item.strip())
+    if not values or any(value <= 0 for value in values):
+        raise ValueError(f"{name} must contain positive comma-separated integers")
+    return values
+
+
 def _bool(name: str, default: bool) -> bool:
     raw = os.getenv(name, "true" if default else "false").strip().lower()
     if raw in {"1", "true", "yes", "on"}:
@@ -60,8 +71,14 @@ class Settings:
     provider_connect_timeout: int
     provider_read_timeout: int
     image_download_timeout: int
+    image_download_direct_fallback: bool
     poll_interval: int
+    delayed_poll_interval: int
     max_wait: int
+    hard_wait: int
+    result_recovery_window: int
+    recovery_retry_intervals: tuple[int, ...]
+    poll_job_retry_max: int
     job_timeout: int
     state_ttl: int
     recovery_interval: int
@@ -74,6 +91,8 @@ class Settings:
     aspect_ratio: str
     render_to_uv_task: str
     render_to_uv_job_timeout: int
+    render_to_uv_retry_max: int
+    render_to_uv_retry_intervals: tuple[int, ...]
     aws_access_key_id: str
     aws_secret_access_key: str
     aws_region: str
@@ -129,10 +148,29 @@ def get_settings() -> Settings:
         image_download_timeout=_positive_int(
             "IMAGE_DOWNLOAD_TIMEOUT_SECONDS", 30
         ),
+        image_download_direct_fallback=_bool(
+            "IMAGE_DOWNLOAD_DIRECT_FALLBACK", True
+        ),
         poll_interval=_positive_int(
             "REAL_TO_RENDER_POLL_INTERVAL_SECONDS", 10
         ),
+        delayed_poll_interval=_positive_int(
+            "REAL_TO_RENDER_DELAYED_POLL_INTERVAL_SECONDS", 60
+        ),
         max_wait=_positive_int("REAL_TO_RENDER_MAX_WAIT_SECONDS", 320),
+        hard_wait=_positive_int(
+            "REAL_TO_RENDER_HARD_WAIT_SECONDS", 1800
+        ),
+        result_recovery_window=_positive_int(
+            "REAL_TO_RENDER_RESULT_RECOVERY_SECONDS", 5400
+        ),
+        recovery_retry_intervals=_positive_int_tuple(
+            "REAL_TO_RENDER_RETRY_INTERVALS_SECONDS",
+            (2, 5, 15, 30, 60),
+        ),
+        poll_job_retry_max=_positive_int(
+            "REAL_TO_RENDER_POLL_JOB_RETRY_MAX", 5
+        ),
         job_timeout=_positive_int(
             "REAL_TO_RENDER_JOB_TIMEOUT_SECONDS",
             320,
@@ -160,6 +198,13 @@ def get_settings() -> Settings:
         ),
         render_to_uv_job_timeout=_positive_int(
             "RENDER_TO_UV_JOB_TIMEOUT_SECONDS", 120
+        ),
+        render_to_uv_retry_max=_positive_int(
+            "RENDER_TO_UV_RETRY_MAX", 5
+        ),
+        render_to_uv_retry_intervals=_positive_int_tuple(
+            "RENDER_TO_UV_RETRY_INTERVALS_SECONDS",
+            (5, 15, 30, 60, 120),
         ),
         aws_access_key_id=_required("AWS_S3_ACCESS_KEY_ID"),
         aws_secret_access_key=_required("AWS_S3_SECRET_ACCESS_KEY"),

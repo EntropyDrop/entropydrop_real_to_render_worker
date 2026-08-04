@@ -25,16 +25,23 @@ adds a positive `CreditLog(action="refund")`.
 
 - Provider `failed`, including `failure_reason="error"`: fail once, no retry.
 - Provider moderation failures: fail once, no retry.
-- Provider or download HTTP timeout: fail once, no retry.
-- Overall stage-1 timeout (default 320 seconds): fail once, no retry.
+- Provider submit timeouts are marked `submit_unknown` and are never
+  resubmitted automatically, because the provider may already have charged.
+- Provider status, result download, normalization, S3 upload, and GPU handoff
+  errors are retried from persisted state without submitting a new generation.
+- The 320-second provider wait is soft; polling slows to once per minute.
+- The hard provider wait defaults to 1800 seconds. Result recovery continues
+  for up to 5400 seconds, below the result URL's two-hour lifetime.
 - Each scheduled poll RQ execution has a 320-second hard timeout, configured
   by `REAL_TO_RENDER_JOB_TIMEOUT_SECONDS`.
-- S3 or handoff error: fail once, no retry.
-- Every sample RQ job is enqueued with `retry=None`.
+- Poll jobs have a bounded RQ retry as a fallback for worker/Redis interruption.
+- GPU handoff uses five bounded RQ retries. The billable Provider POST itself
+  still uses `retry=None`.
 
 The provider documentation says `failure_reason="error"` may be resubmitted.
-This sample intentionally does not do so because a resubmission can create a
-second billable generation.
+This worker intentionally does not do so because a resubmission can create a
+second billable generation. An uncertain submit requires reconciliation by
+provider task lookup, billing records, or a future provider idempotency key.
 
 ## Polling
 

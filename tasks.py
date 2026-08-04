@@ -7,8 +7,9 @@ from datetime import timedelta
 from functools import lru_cache
 from typing import Iterator
 
+import requests
 from redis import Redis
-from rq import Queue
+from rq import Queue, Retry
 from rq.exceptions import NoSuchJobError
 from rq.job import Callback, Job
 
@@ -73,6 +74,7 @@ def redis_connection() -> Redis:
         health_check_interval=20,
         socket_connect_timeout=5,
         socket_timeout=20,
+        retry_on_timeout=True,
     )
 
 
@@ -88,6 +90,9 @@ def provider_client() -> RealToRenderProvider:
         download_timeout=settings.image_download_timeout,
         proxy_url=settings.outbound_http_proxy,
         api_use_proxy=settings.provider_use_proxy,
+        download_direct_fallback=(
+            settings.image_download_direct_fallback
+        ),
     )
 
 
@@ -167,6 +172,7 @@ def schedule_poll(
     submitted_at: float,
     queue_prefix: str,
     poll_number: int,
+    delay_seconds: int | None = None,
 ) -> Job:
     settings = get_settings()
     job_id = f"real_to_render_poll_{log_id}_{poll_number}"
@@ -179,8 +185,21 @@ def schedule_poll(
         queue_name(queue_prefix, "queue_real_to_render"),
         connection=redis_connection(),
     )
+    retry_intervals = list(
+        getattr(
+            settings,
+            "recovery_retry_intervals",
+            (2, 5, 15, 30, 60),
+        )
+    )
     return queue.enqueue_in(
-        timedelta(seconds=settings.poll_interval),
+        timedelta(
+            seconds=(
+                delay_seconds
+                if delay_seconds is not None
+                else settings.poll_interval
+            )
+        ),
         "tasks.poll_real_to_render",
         args=(
             log_id,
@@ -192,7 +211,10 @@ def schedule_poll(
         ),
         job_id=job_id,
         job_timeout=settings.job_timeout,
-        retry=None,
+        retry=Retry(
+            max=getattr(settings, "poll_job_retry_max", 5),
+            interval=retry_intervals,
+        ),
         on_failure=Callback(
             "tasks.real_to_render_job_failure",
             timeout=20,
@@ -230,6 +252,71 @@ def fail_stage(
     )
 
 
+def _state_int(state: dict[str, str], key: str, default: int = 0) -> int:
+    try:
+        return int(state.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def schedule_stage_recovery(
+    *,
+    log_id: str,
+    is_public: bool,
+    provider_task_id: str,
+    submitted_at: float,
+    queue_prefix: str,
+    poll_number: int,
+    phase: str,
+    error: Exception | str,
+    state: dict[str, str] | None = None,
+    backend_status: str = "processing",
+    edited_result: str | None = None,
+) -> Job:
+    """Persist a transient failure and schedule a safe, idempotent retry."""
+    settings = get_settings()
+    state = state or load_state(log_id)
+    attempt_key = f"{phase}_attempts"
+    attempt = _state_int(state, attempt_key) + 1
+    intervals = getattr(
+        settings,
+        "recovery_retry_intervals",
+        (2, 5, 15, 30, 60),
+    )
+    delay = intervals[min(attempt - 1, len(intervals) - 1)]
+    message = str(error)
+    save_state(
+        log_id,
+        recovery_phase=phase,
+        **{
+            attempt_key: attempt,
+            "last_error": message,
+            "last_error_type": type(error).__name__,
+            "next_retry_at": time.time() + delay,
+        },
+    )
+    report_status(
+        log_id,
+        backend_status,
+        provider_task_id=provider_task_id,
+        edited_result=edited_result,
+        retrying=True,
+        error_origin=phase,
+        retry_attempt=attempt,
+        next_retry_seconds=delay,
+        error_msg=message,
+    )
+    return schedule_poll(
+        log_id=log_id,
+        is_public=is_public,
+        provider_task_id=provider_task_id,
+        submitted_at=submitted_at,
+        queue_prefix=queue_prefix,
+        poll_number=poll_number + 1,
+        delay_seconds=delay,
+    )
+
+
 def real_to_render_job_failure(
     job: Job,
     connection: Redis,
@@ -251,6 +338,50 @@ def real_to_render_job_failure(
         if isinstance(raw_task_id, bytes)
         else raw_task_id
     )
+    state = load_state(log_id)
+    if job.func_name == "tasks.submit_real_to_render":
+        queue_prefix = job.args[4] if len(job.args) > 4 else ""
+        if provider_task_id:
+            submitted_at = float(
+                state.get("submitted_at") or time.time()
+            )
+            schedule_poll(
+                log_id=log_id,
+                is_public=bool(job.args[1]),
+                provider_task_id=provider_task_id,
+                submitted_at=submitted_at,
+                queue_prefix=queue_prefix,
+                poll_number=max(
+                    _state_int(state, "poll_number") + 1,
+                    int(time.time()),
+                ),
+            )
+            report_status(
+                log_id,
+                "processing",
+                provider_task_id=provider_task_id,
+                provider_submission_state="accepted",
+                retrying=True,
+                error_origin="submit_job_interrupted",
+            )
+            return
+        if state.get("submission_state") in {"in_flight", "unknown"}:
+            save_state(
+                log_id,
+                submission_state="unknown",
+                recovery_phase="submit_unknown",
+                last_error=str(exception_value or "Submission interrupted"),
+            )
+            report_status(
+                log_id,
+                "processing",
+                provider_submission_state="unknown",
+                retrying=False,
+                requires_reconciliation=True,
+                error_origin="provider_submit_api",
+                error_msg=str(exception_value or "Submission interrupted"),
+            )
+            return
     fail_stage(
         log_id,
         exception_value or "Stage-1 RQ job stopped",
@@ -299,6 +430,12 @@ def submit_real_to_render(
             next_poll_number = (
                 int(existing_state.get("poll_number") or 0) + 1
             )
+            report_status(
+                log_id,
+                "processing",
+                provider_task_id=provider_task_id,
+                provider_submission_state="accepted",
+            )
             schedule_poll(
                 log_id=log_id,
                 is_public=is_public,
@@ -307,13 +444,35 @@ def submit_real_to_render(
                 queue_prefix=queue_prefix,
                 poll_number=next_poll_number,
             )
+            logger.warning(
+                "Resumed provider polling for interrupted submission %s",
+                log_id,
+            )
+            return
+
+        if existing_state.get("submission_state") in {
+            "in_flight",
+            "unknown",
+        }:
+            save_state(
+                log_id,
+                submission_state="unknown",
+                recovery_phase="submit_unknown",
+            )
             report_status(
                 log_id,
                 "processing",
-                provider_task_id=provider_task_id,
+                provider_submission_state="unknown",
+                retrying=False,
+                requires_reconciliation=True,
+                error_origin="provider_submit_api",
+                error_msg=(
+                    existing_state.get("last_error")
+                    or "Provider submission acceptance is uncertain"
+                ),
             )
-            logger.warning(
-                "Resumed provider polling for interrupted submission %s",
+            logger.error(
+                "Refusing to resubmit uncertain provider request for %s",
                 log_id,
             )
             return
@@ -345,22 +504,84 @@ def submit_real_to_render(
             )
             timing["image_count"] = len(references)
 
-        with timed_step("provider_submit_api", log_id) as timing:
-            provider_task_id = provider_client().submit(
-                images=references,
-                prompt=prompt,
-                aspect_ratio=settings.aspect_ratio,
-                image_size=settings.image_size,
+        save_state(
+            log_id,
+            submission_state="in_flight",
+            submission_started_at=time.time(),
+        )
+        report_status(
+            log_id,
+            "processing",
+            provider_submission_state="in_flight",
+        )
+        try:
+            with timed_step("provider_submit_api", log_id) as timing:
+                provider_task_id = provider_client().submit(
+                    images=references,
+                    prompt=prompt,
+                    aspect_ratio=settings.aspect_ratio,
+                    image_size=settings.image_size,
+                )
+                timing["provider_task_id"] = provider_task_id
+        except requests.HTTPError as exc:
+            status_code = getattr(exc.response, "status_code", 0)
+            if 400 <= status_code < 500:
+                fail_stage(
+                    log_id,
+                    exc,
+                    failure_reason="provider_rejected",
+                )
+                return
+            save_state(
+                log_id,
+                submission_state="unknown",
+                recovery_phase="submit_unknown",
+                last_error=str(exc),
+                last_error_type=type(exc).__name__,
             )
-            timing["provider_task_id"] = provider_task_id
+            report_status(
+                log_id,
+                "processing",
+                provider_submission_state="unknown",
+                retrying=False,
+                requires_reconciliation=True,
+                error_origin="provider_submit_api",
+                error_msg=str(exc),
+            )
+            return
+        except Exception as exc:
+            save_state(
+                log_id,
+                submission_state="unknown",
+                recovery_phase="submit_unknown",
+                last_error=str(exc),
+                last_error_type=type(exc).__name__,
+            )
+            report_status(
+                log_id,
+                "processing",
+                provider_submission_state="unknown",
+                retrying=False,
+                requires_reconciliation=True,
+                error_origin="provider_submit_api",
+                error_msg=str(exc),
+            )
+            return
         submitted_at = time.time()
         save_state(
             log_id,
+            submission_state="accepted",
             provider_task_id=provider_task_id,
             submitted_at=submitted_at,
             provider_status="running",
             progress=0,
             poll_number=0,
+        )
+        report_status(
+            log_id,
+            "processing",
+            provider_task_id=provider_task_id,
+            provider_submission_state="accepted",
         )
         schedule_poll(
             log_id=log_id,
@@ -370,14 +591,53 @@ def submit_real_to_render(
             queue_prefix=queue_prefix,
             poll_number=1,
         )
-        report_status(
-            log_id,
-            "processing",
-            provider_task_id=provider_task_id,
-        )
     except Exception as exc:
         traceback.print_exc()
+        if provider_task_id:
+            raise
         fail_stage(log_id, exc, provider_task_id=provider_task_id)
+
+
+def resume_real_to_render(
+    log_id: str,
+    is_public: bool,
+    source: str,
+    content_type: str,
+    queue_prefix: str,
+    provider_task_id: str,
+) -> None:
+    """Recover an accepted provider task without ever resubmitting it."""
+    del source, content_type
+    state = load_state(log_id)
+    if state.get("terminal_status"):
+        return
+    submitted_at = float(state.get("submitted_at") or time.time())
+    poll_number = max(
+        _state_int(state, "poll_number") + 1,
+        int(time.time()),
+    )
+    save_state(
+        log_id,
+        submission_state="accepted",
+        provider_task_id=provider_task_id,
+        submitted_at=submitted_at,
+    )
+    report_status(
+        log_id,
+        "processing",
+        provider_task_id=provider_task_id,
+        provider_submission_state="accepted",
+        retrying=True,
+        error_origin="backend_recovery",
+    )
+    schedule_poll(
+        log_id=log_id,
+        is_public=is_public,
+        provider_task_id=provider_task_id,
+        submitted_at=submitted_at,
+        queue_prefix=queue_prefix,
+        poll_number=poll_number,
+    )
 
 
 def enqueue_render_to_uv_once(
@@ -409,7 +669,10 @@ def enqueue_render_to_uv_once(
         ),
         job_id=job_id,
         job_timeout=settings.render_to_uv_job_timeout,
-        retry=None,
+        retry=Retry(
+            max=settings.render_to_uv_retry_max,
+            interval=list(settings.render_to_uv_retry_intervals),
+        ),
         result_ttl=60,
         failure_ttl=86400,
     )
@@ -423,101 +686,272 @@ def poll_real_to_render(
     queue_prefix: str = "",
     poll_number: int = 1,
 ) -> None:
-    """Perform one short poll and schedule another only while still running."""
-    try:
-        settings = get_settings()
-        elapsed = time.time() - float(submitted_at)
-        if elapsed >= settings.max_wait:
-            fail_stage(
-                log_id,
-                f"Stage 1 timed out after {settings.max_wait} seconds",
-                provider_task_id=provider_task_id,
-                failure_reason="timeout",
-            )
-            return
+    """Advance one recoverable stage without resubmitting the provider job."""
+    settings = get_settings()
+    state = load_state(log_id)
+    if state.get("terminal_status"):
+        return
 
-        with timed_step(
-            "provider_status_api",
-            log_id,
-            provider_task_id=provider_task_id,
-            poll_number=poll_number,
-        ) as timing:
-            status = provider_client().get_status(provider_task_id)
-            timing["provider_status"] = status.status
-            timing["provider_progress"] = status.progress
-        save_state(
-            log_id,
-            provider_task_id=provider_task_id,
-            provider_status=status.status,
-            progress=status.progress,
-            last_polled_at=time.time(),
-            poll_number=poll_number,
+    elapsed = time.time() - float(submitted_at)
+    intermediate_key = state.get("intermediate_key")
+
+    if not intermediate_key:
+        result_url = (
+            state.get("result_url")
+            if state.get("provider_status") == "succeeded"
+            else None
         )
+        if not result_url:
+            try:
+                with timed_step(
+                    "provider_status_api",
+                    log_id,
+                    provider_task_id=provider_task_id,
+                    poll_number=poll_number,
+                ) as timing:
+                    status = provider_client().get_status(provider_task_id)
+                    timing["provider_status"] = status.status
+                    timing["provider_progress"] = status.progress
+            except Exception as exc:
+                traceback.print_exc()
+                schedule_stage_recovery(
+                    log_id=log_id,
+                    is_public=is_public,
+                    provider_task_id=provider_task_id,
+                    submitted_at=submitted_at,
+                    queue_prefix=queue_prefix,
+                    poll_number=poll_number,
+                    phase="provider_status_api",
+                    error=exc,
+                    state=state,
+                )
+                return
 
-        if status.status == "running":
-            schedule_poll(
+            save_state(
+                log_id,
+                provider_task_id=provider_task_id,
+                provider_status=status.status,
+                progress=status.progress,
+                last_polled_at=time.time(),
+                poll_number=poll_number,
+            )
+
+            if status.status == "running":
+                if elapsed >= settings.hard_wait:
+                    fail_stage(
+                        log_id,
+                        (
+                            "Provider still reported running after "
+                            f"{settings.hard_wait} seconds"
+                        ),
+                        provider_task_id=provider_task_id,
+                        failure_reason="provider_hard_timeout",
+                    )
+                    return
+                delayed = elapsed >= settings.max_wait
+                if state.get("recovery_phase") == "provider_status_api":
+                    save_state(
+                        log_id,
+                        recovery_phase="provider_running",
+                        last_error="",
+                    )
+                    report_status(
+                        log_id,
+                        "processing",
+                        provider_task_id=provider_task_id,
+                        provider_submission_state="accepted",
+                    )
+                if delayed and not state.get("soft_timeout_at"):
+                    save_state(log_id, soft_timeout_at=time.time())
+                    report_status(
+                        log_id,
+                        "processing",
+                        provider_task_id=provider_task_id,
+                        provider_submission_state="accepted",
+                        provider_delayed=True,
+                    )
+                schedule_poll(
+                    log_id=log_id,
+                    is_public=is_public,
+                    provider_task_id=provider_task_id,
+                    submitted_at=submitted_at,
+                    queue_prefix=queue_prefix,
+                    poll_number=poll_number + 1,
+                    delay_seconds=(
+                        settings.delayed_poll_interval
+                        if delayed
+                        else settings.poll_interval
+                    ),
+                )
+                return
+
+            if status.status == "failed":
+                detail = (
+                    status.error
+                    or status.failure_reason
+                    or "Provider failed"
+                )
+                fail_stage(
+                    log_id,
+                    detail,
+                    provider_task_id=provider_task_id,
+                    failure_reason=status.failure_reason or "error",
+                )
+                return
+
+            result_url = status.result_url
+            result_deadline = float(
+                state.get("result_deadline")
+                or (time.time() + settings.result_recovery_window)
+            )
+            save_state(
+                log_id,
+                provider_status="succeeded",
+                progress=100,
+                result_url=result_url,
+                result_url_obtained_at=(
+                    state.get("result_url_obtained_at") or time.time()
+                ),
+                result_deadline=result_deadline,
+                recovery_phase="result_fetch_pending",
+            )
+            state = load_state(log_id)
+
+        result_deadline = float(
+            state.get("result_deadline")
+            or (time.time() + settings.result_recovery_window)
+        )
+        try:
+            with timed_step(
+                "provider_result_download",
+                log_id,
+                provider_task_id=provider_task_id,
+            ) as timing:
+                raw_result = provider_client().download_result(result_url)
+                timing["size_mb"] = size_mb(len(raw_result))
+        except Exception as exc:
+            traceback.print_exc()
+            if time.time() >= result_deadline:
+                fail_stage(
+                    log_id,
+                    (
+                        "Provider result could not be recovered before "
+                        "its recovery deadline"
+                    ),
+                    provider_task_id=provider_task_id,
+                    failure_reason="result_recovery_timeout",
+                )
+                return
+            if isinstance(exc, requests.HTTPError):
+                status_code = getattr(exc.response, "status_code", 0)
+                if status_code in {403, 404}:
+                    save_state(
+                        log_id,
+                        provider_status="refresh_result_url",
+                        result_url="",
+                    )
+            schedule_stage_recovery(
                 log_id=log_id,
                 is_public=is_public,
                 provider_task_id=provider_task_id,
                 submitted_at=submitted_at,
                 queue_prefix=queue_prefix,
-                poll_number=poll_number + 1,
+                poll_number=poll_number,
+                phase="provider_result_download",
+                error=exc,
+                state=state,
             )
             return
 
-        if status.status == "failed":
-            detail = status.error or status.failure_reason or "Provider failed"
+        try:
+            with timed_step("normalize_render", log_id) as timing:
+                normalized_png, dimensions = normalize_combined_render(
+                    raw_result
+                )
+                timing["input_size_mb"] = size_mb(len(raw_result))
+                timing["output_size_mb"] = size_mb(len(normalized_png))
+                timing["width"] = dimensions[0]
+                timing["height"] = dimensions[1]
+            with timed_step("validate_shape", log_id) as timing:
+                try:
+                    overlap = validate_combined_render_shape(normalized_png)
+                except InvalidShapeError as exc:
+                    if exc.overlap_ratio is not None:
+                        timing["overlap_ratio"] = round(
+                            exc.overlap_ratio,
+                            6,
+                        )
+                    raise
+                timing["overlap_ratio"] = round(overlap, 6)
+        except InvalidShapeError as exc:
+            traceback.print_exc()
             fail_stage(
                 log_id,
-                detail,
+                exc,
                 provider_task_id=provider_task_id,
-                failure_reason=status.failure_reason or "error",
+                failure_reason="invalid_shape",
+            )
+            return
+        except Exception as exc:
+            traceback.print_exc()
+            schedule_stage_recovery(
+                log_id=log_id,
+                is_public=is_public,
+                provider_task_id=provider_task_id,
+                submitted_at=submitted_at,
+                queue_prefix=queue_prefix,
+                poll_number=poll_number,
+                phase="normalize_render",
+                error=exc,
+                state=state,
             )
             return
 
-        with timed_step(
-            "provider_result_download",
-            log_id,
-            provider_task_id=provider_task_id,
-        ) as timing:
-            raw_result = provider_client().download_result(
-                status.result_url
+        intermediate_key = f"real_to_render_intermediate/{log_id}.png"
+        try:
+            with timed_step(
+                "s3_upload",
+                log_id,
+                storage_scope="public" if is_public else "private",
+                size_mb=size_mb(len(normalized_png)),
+            ):
+                object_storage().upload_png(
+                    intermediate_key,
+                    normalized_png,
+                    is_public,
+                )
+        except Exception as exc:
+            traceback.print_exc()
+            schedule_stage_recovery(
+                log_id=log_id,
+                is_public=is_public,
+                provider_task_id=provider_task_id,
+                submitted_at=submitted_at,
+                queue_prefix=queue_prefix,
+                poll_number=poll_number,
+                phase="s3_upload",
+                error=exc,
+                state=state,
             )
-            timing["size_mb"] = size_mb(len(raw_result))
+            return
 
-        with timed_step("normalize_render", log_id) as timing:
-            normalized_png, dimensions = normalize_combined_render(
-                raw_result
-            )
-            timing["input_size_mb"] = size_mb(len(raw_result))
-            timing["output_size_mb"] = size_mb(len(normalized_png))
-            timing["width"] = dimensions[0]
-            timing["height"] = dimensions[1]
-        with timed_step("validate_shape", log_id) as timing:
-            try:
-                overlap = validate_combined_render_shape(normalized_png)
-            except InvalidShapeError as exc:
-                if exc.overlap_ratio is not None:
-                    timing["overlap_ratio"] = round(
-                        exc.overlap_ratio,
-                        6,
-                    )
-                raise
-            timing["overlap_ratio"] = round(overlap, 6)
-        intermediate_key = (
-            f"real_to_render_intermediate/{log_id}.png"
-        )
-        with timed_step(
-            "s3_upload",
+        save_state(
             log_id,
-            storage_scope="public" if is_public else "private",
-            size_mb=size_mb(len(normalized_png)),
-        ):
-            object_storage().upload_png(
-                intermediate_key,
-                normalized_png,
-                is_public,
-            )
+            provider_status="succeeded",
+            progress=100,
+            intermediate_key=intermediate_key,
+            dimensions=f"{dimensions[0]}x{dimensions[1]}",
+            recovery_phase="handoff_pending",
+        )
+
+    report_status(
+        log_id,
+        "pending_skin",
+        provider_task_id=provider_task_id,
+        provider_submission_state="accepted",
+        edited_result=intermediate_key,
+    )
+    try:
         with timed_step("enqueue_render_to_uv", log_id):
             enqueue_render_to_uv_once(
                 log_id=log_id,
@@ -525,30 +959,26 @@ def poll_real_to_render(
                 intermediate_key=intermediate_key,
                 queue_prefix=queue_prefix,
             )
-        save_state(
-            log_id,
-            terminal_status="handed_off",
-            provider_status="succeeded",
-            progress=100,
-            intermediate_key=intermediate_key,
-            dimensions=f"{dimensions[0]}x{dimensions[1]}",
-            finished_at=time.time(),
-        )
-        report_status(
-            log_id,
-            "pending_skin",
-            provider_task_id=provider_task_id,
-            edited_result=intermediate_key,
-        )
     except Exception as exc:
         traceback.print_exc()
-        fail_stage(
-            log_id,
-            exc,
+        schedule_stage_recovery(
+            log_id=log_id,
+            is_public=is_public,
             provider_task_id=provider_task_id,
-            failure_reason=(
-                "invalid_shape"
-                if isinstance(exc, InvalidShapeError)
-                else "error"
-            ),
+            submitted_at=submitted_at,
+            queue_prefix=queue_prefix,
+            poll_number=poll_number,
+            phase="enqueue_render_to_uv",
+            error=exc,
+            state=state,
+            backend_status="pending_skin",
+            edited_result=intermediate_key,
         )
+        return
+
+    save_state(
+        log_id,
+        terminal_status="handed_off",
+        recovery_phase="complete",
+        finished_at=time.time(),
+    )
