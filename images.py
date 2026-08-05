@@ -2,16 +2,16 @@ import base64
 import io
 from functools import lru_cache
 from pathlib import Path
-from statistics import median
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_RESULT_BYTES = 20 * 1024 * 1024
 EXPECTED_SHAPE_SIZE = (1024, 1024)
 MIN_SHAPE_OVERLAP = 0.95
-BACKGROUND_COLOR_TOLERANCE = 20
+BACKGROUND_COLOR_TOLERANCE = 0.03
+SHAPE_MASK_EROSION_PIXELS = 2
 SHAPE_MASK_PATH = (
     Path(__file__).resolve().parent
     / "masks"
@@ -60,36 +60,15 @@ def template_data_urls(paths: tuple[Path, ...]) -> list[str]:
     return urls
 
 
-def _border_background_color(image: Image.Image) -> tuple[int, int, int]:
-    """Estimate the pure background color from sparse border samples."""
-    rgb = image.convert("RGB")
-    width, height = rgb.size
-    step = max(1, min(width, height) // 128)
-    pixels = rgb.load()
-    samples = []
-
-    for x in range(0, width, step):
-        samples.append(pixels[x, 0])
-        samples.append(pixels[x, height - 1])
-    for y in range(0, height, step):
-        samples.append(pixels[0, y])
-        samples.append(pixels[width - 1, y])
-
-    return tuple(
-        int(median(sample[channel] for sample in samples))
-        for channel in range(3)
-    )
-
-
 def _foreground_mask(image: Image.Image) -> Image.Image:
-    """Remove a transparent or pure-color background into a binary L mask."""
+    """Extract foreground via alpha or a top-left four-connected color flood."""
     rgba = image.convert("RGBA")
     alpha = rgba.getchannel("A")
     if alpha.getextrema()[0] < 255:
         return alpha.point(lambda value: 255 if value > 16 else 0)
 
     rgb = rgba.convert("RGB")
-    background = Image.new("RGB", rgb.size, _border_background_color(rgb))
+    background = Image.new("RGB", rgb.size, rgb.getpixel((0, 0)))
     channel_differences = ImageChops.difference(rgb, background).split()
     maximum_difference = ImageChops.lighter(
         ImageChops.lighter(
@@ -98,13 +77,21 @@ def _foreground_mask(image: Image.Image) -> Image.Image:
         ),
         channel_differences[2],
     )
-    return maximum_difference.point(
-        lambda value: 255 if value > BACKGROUND_COLOR_TOLERANCE else 0
+    background_candidates = maximum_difference.point(
+        lambda value: (
+            255 if value / 255.0 <= BACKGROUND_COLOR_TOLERANCE else 0
+        )
+    )
+    ImageDraw.floodfill(background_candidates, (0, 0), 128)
+    return background_candidates.point(
+        lambda value: 0 if value == 128 else 255
     )
 
 
-@lru_cache(maxsize=1)
-def _expected_foreground_mask() -> Image.Image:
+@lru_cache(maxsize=8)
+def _expected_foreground_mask(
+    size: tuple[int, int] = EXPECTED_SHAPE_SIZE,
+) -> Image.Image:
     if not SHAPE_MASK_PATH.is_file():
         raise FileNotFoundError(
             f"Stage-1 shape mask does not exist: {SHAPE_MASK_PATH}"
@@ -120,20 +107,30 @@ def _expected_foreground_mask() -> Image.Image:
             )
         # The committed renderer mask is black on white. Invert it so Pillow
         # can count foreground intersections with 255-valued binary masks.
-        return image.convert("L").point(
+        foreground = image.convert("L").point(
             lambda value: 255 if value < 128 else 0
         )
+        if foreground.size != size:
+            foreground = foreground.resize(size, Image.Resampling.NEAREST)
+
+        erosion_pixels = min(
+            SHAPE_MASK_EROSION_PIXELS,
+            (min(size) - 1) // 2,
+        )
+        if erosion_pixels:
+            kernel_size = erosion_pixels * 2 + 1
+            foreground = foreground.filter(ImageFilter.MinFilter(kernel_size))
+        return foreground
 
 
 def combined_render_shape_overlap(content: bytes) -> float:
     """Calculate rendered-foreground intersection / expected-mask pixels."""
     with Image.open(io.BytesIO(content)) as image:
         image.load()
-        if image.size != EXPECTED_SHAPE_SIZE:
-            raise InvalidShapeError()
+        render_size = image.size
         rendered_foreground = _foreground_mask(image)
 
-    expected_foreground = _expected_foreground_mask()
+    expected_foreground = _expected_foreground_mask(render_size)
     intersection = ImageChops.multiply(
         rendered_foreground,
         expected_foreground,
