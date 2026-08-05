@@ -74,7 +74,7 @@ Regenerate the mask from a sibling renderer checkout with:
 python scripts/generate_shape_mask.py
 ```
 
-## Templates, prompt, and pipeline version
+## Pipeline task parameters
 
 The versioned stage-1 inputs are:
 
@@ -83,11 +83,15 @@ The versioned stage-1 inputs are:
 3. `templates/template52.png` as 图4;
 4. `prompts/real_to_render.zh-hans.txt`.
 
-The default bundle identifier is
-`real2render-t41-t51-t52-sking-ddj-v54-v1`. The corresponding stage-2
-checkpoint is `/root/Sking/SKING_DDJ_v54.pt` in the GPU container. A production
-pipeline version should continue to identify the provider model, ordered
-templates, prompt, Dense UV checkpoint, and renderer mappings together.
+The backend owns the immutable `model_version` mapping and sends all seven
+pipeline fields with every task. This worker does not map model versions to
+resources. It resolves the received bare prompt and template filenames under
+`PROMPTS_ROOT_DIR` and `TEMPLATES_ROOT_DIR`, then forwards the received Dense UV
+checkpoint filename and DMR mappings directory to the GPU task.
+
+Because this changes the RQ task contract, drain or pause the affected queues,
+deploy the GPU worker and this worker, then deploy the backend before resuming
+traffic.
 
 ## Local setup
 
@@ -174,7 +178,15 @@ from rq.job import Callback
 
 q_real_to_render.enqueue(
     "tasks.submit_real_to_render",
-    args=(log.id, log.is_public, log.source, content_type, prefix),
+    args=(
+        log.id,
+        log.is_public,
+        log.source,
+        content_type,
+        prefix,
+        log.model_version,
+        pipeline_payload,
+    ),
     job_id=f"generation_{log.id}_real_to_render",
     job_timeout=60,
     retry=None,
@@ -195,12 +207,14 @@ def task_render_to_uv(
     is_public: bool,
     source: str,
     content_type: str,
-    pipeline_version: str,
+    model_version: str,
+    dense_uv_checkpoint_file: str,
+    DMR_mappings_dir: str,
 ): ...
 ```
 
-That function should preload `/root/Sking/SKING_DDJ_v54.pt`, SigLIP2, and
-mappings once, report stage `render_to_uv`, and also use no RQ retry.
+The GPU worker joins those two relative values to its deployment-specific root
+directories, loads the requested runtime lazily, and caches it for later jobs.
 
 ## License
 

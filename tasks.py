@@ -3,8 +3,11 @@ import logging
 import time
 import traceback
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import lru_cache
+from pathlib import Path
+from collections.abc import Mapping
 from typing import Iterator
 
 import requests
@@ -32,6 +35,143 @@ from storage import ObjectStorage
 STAGE = "real_to_render"
 BYTES_PER_MB = 1024 * 1024
 logger = logging.getLogger("rq.job")
+
+
+@dataclass(frozen=True)
+class SkinPipelineParams:
+    prompt_file: str
+    template_files: tuple[str, ...]
+    provider_model: str
+    image_size: str
+    aspect_ratio: str
+    dense_uv_checkpoint_file: str
+    DMR_mappings_dir: str
+
+    @classmethod
+    def from_payload(
+        cls,
+        payload: Mapping[str, object],
+    ) -> "SkinPipelineParams":
+        if not isinstance(payload, Mapping):
+            raise ValueError("Missing or invalid skin pipeline parameters")
+        try:
+            template_files = payload["template_files"]
+            string_fields = {
+                name: payload[name]
+                for name in (
+                    "prompt_file",
+                    "provider_model",
+                    "image_size",
+                    "aspect_ratio",
+                    "dense_uv_checkpoint_file",
+                    "DMR_mappings_dir",
+                )
+            }
+            if (
+                not isinstance(template_files, (list, tuple))
+                or any(not isinstance(item, str) for item in template_files)
+                or any(
+                    not isinstance(value, str)
+                    for value in string_fields.values()
+                )
+            ):
+                raise TypeError("pipeline fields have invalid types")
+            pipeline = cls(
+                prompt_file=string_fields["prompt_file"],
+                template_files=tuple(template_files),
+                provider_model=string_fields["provider_model"],
+                image_size=string_fields["image_size"],
+                aspect_ratio=string_fields["aspect_ratio"],
+                dense_uv_checkpoint_file=string_fields[
+                    "dense_uv_checkpoint_file"
+                ],
+                DMR_mappings_dir=string_fields["DMR_mappings_dir"],
+            )
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                f"Missing or invalid skin pipeline parameters: {exc}"
+            ) from exc
+        if not pipeline.template_files or any(
+            not value
+            for value in (
+                pipeline.prompt_file,
+                *pipeline.template_files,
+                pipeline.provider_model,
+                pipeline.image_size,
+                pipeline.aspect_ratio,
+                pipeline.dense_uv_checkpoint_file,
+                pipeline.DMR_mappings_dir,
+            )
+        ):
+            raise ValueError("Skin pipeline parameters must not be empty")
+        return pipeline
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "prompt_file": self.prompt_file,
+            "template_files": list(self.template_files),
+            "provider_model": self.provider_model,
+            "image_size": self.image_size,
+            "aspect_ratio": self.aspect_ratio,
+            "dense_uv_checkpoint_file": self.dense_uv_checkpoint_file,
+            "DMR_mappings_dir": self.DMR_mappings_dir,
+        }
+
+
+def _resource_path(root: str, filename: str, kind: str) -> Path:
+    relative = Path(filename)
+    if relative.is_absolute() or len(relative.parts) != 1:
+        raise ValueError(
+            f"Pipeline {kind} must be a bare filename: {filename!r}"
+        )
+    return Path(root) / relative
+
+
+@lru_cache(maxsize=None)
+def _load_stage1_assets(
+    pipeline: SkinPipelineParams,
+    prompts_root_dir: str,
+    templates_root_dir: str,
+) -> tuple[str, tuple[Path, ...]]:
+    prompt_path = _resource_path(
+        prompts_root_dir, pipeline.prompt_file, "prompt_file"
+    )
+    template_paths = tuple(
+        _resource_path(templates_root_dir, filename, "template_file")
+        for filename in pipeline.template_files
+    )
+    if not prompt_path.is_file():
+        raise FileNotFoundError(f"Pipeline prompt does not exist: {prompt_path}")
+    missing_templates = [
+        str(path) for path in template_paths if not path.is_file()
+    ]
+    if missing_templates:
+        raise FileNotFoundError(
+            "Pipeline templates do not exist: " + ", ".join(missing_templates)
+        )
+    prompt_template = prompt_path.read_text(encoding="utf-8").strip()
+    if not prompt_template:
+        raise RuntimeError(f"Pipeline prompt is empty: {prompt_path}")
+    if (
+        "{template_refs}" not in prompt_template
+        and len(template_paths) != 3
+    ):
+        raise RuntimeError(
+            "A fixed prompt without {template_refs} requires exactly "
+            "three templates"
+        )
+    return prompt_template, template_paths
+
+
+def load_stage1_assets(
+    pipeline: SkinPipelineParams,
+) -> tuple[str, tuple[Path, ...]]:
+    settings = get_settings()
+    return _load_stage1_assets(
+        pipeline,
+        settings.prompts_root_dir,
+        settings.templates_root_dir,
+    )
 
 
 def size_mb(byte_count: int) -> float:
@@ -82,13 +222,13 @@ def redis_connection() -> Redis:
     )
 
 
-@lru_cache(maxsize=1)
-def provider_client() -> RealToRenderProvider:
+@lru_cache(maxsize=None)
+def provider_client(provider_model: str) -> RealToRenderProvider:
     settings = get_settings()
     return RealToRenderProvider(
         base_url=settings.provider_base_url,
         api_key=settings.provider_api_key,
-        model=settings.provider_model,
+        model=provider_model,
         connect_timeout=settings.provider_connect_timeout,
         read_timeout=settings.provider_read_timeout,
         download_timeout=settings.image_download_timeout,
@@ -119,16 +259,22 @@ def state_key(log_id: str) -> str:
 
 def report_status(log_id: str, status: str, **fields) -> None:
     settings = get_settings()
+    connection = redis_connection()
     payload = {
         "log_id": log_id,
         "status": status,
         "stage": STAGE,
-        "pipeline_version": settings.pipeline_version,
     }
+    if "model_version" not in fields:
+        model_version = connection.hget(state_key(log_id), "model_version")
+        if isinstance(model_version, bytes):
+            model_version = model_version.decode("utf-8")
+        if model_version:
+            payload["model_version"] = str(model_version)
     payload.update(
         {key: value for key, value in fields.items() if value is not None}
     )
-    redis_connection().lpush(
+    connection.lpush(
         settings.result_queue_key,
         json.dumps(payload, ensure_ascii=False),
     )
@@ -163,6 +309,72 @@ def load_state(log_id: str) -> dict[str, str]:
     }
 
 
+def resolve_task_pipeline(
+    requested_model_version: str | None,
+    persisted_model_version: str | None = None,
+    requested_pipeline: Mapping[str, object] | None = None,
+    persisted_pipeline_json: str | None = None,
+) -> tuple[str, SkinPipelineParams]:
+    """Validate task parameters against state without selecting a model."""
+    requested_version = requested_model_version or None
+    persisted_version = persisted_model_version or None
+    if (
+        requested_version is not None
+        and persisted_version is not None
+        and requested_version != persisted_version
+    ):
+        raise ValueError(
+            "Real-to-render model version changed within one task: "
+            f"task={requested_version!r}, state={persisted_version!r}"
+        )
+    model_version = requested_version or persisted_version
+    if model_version is None:
+        raise ValueError("Missing model_version for real-to-render task")
+
+    persisted_pipeline = None
+    if persisted_pipeline_json:
+        try:
+            persisted_pipeline = SkinPipelineParams.from_payload(
+                json.loads(persisted_pipeline_json)
+            )
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError(
+                "Invalid persisted skin pipeline parameters"
+            ) from exc
+    task_pipeline = (
+        SkinPipelineParams.from_payload(requested_pipeline)
+        if requested_pipeline is not None
+        else None
+    )
+    if (
+        task_pipeline is not None
+        and persisted_pipeline is not None
+        and task_pipeline != persisted_pipeline
+    ):
+        raise ValueError("Skin pipeline parameters changed within one task")
+    pipeline = task_pipeline or persisted_pipeline
+    if pipeline is None:
+        raise ValueError("Missing skin pipeline parameters")
+    return model_version, pipeline
+
+
+def report_model_error(
+    log_id: str,
+    error: ValueError,
+    model_version: str | None,
+) -> None:
+    logger.error("Model pipeline error for %s: %s", log_id, error)
+    report_status(
+        log_id,
+        "failed",
+        model_version=(
+            model_version if model_version else None
+        ),
+        error_origin="model_pipeline_error",
+        error_msg=str(error),
+    )
+
+
 def queue_name(prefix: str, base: str) -> str:
     if prefix not in ("", "high_"):
         raise ValueError(f"Unsupported queue prefix: {prefix!r}")
@@ -176,6 +388,8 @@ def schedule_poll(
     submitted_at: float,
     queue_prefix: str,
     poll_number: int,
+    model_version: str,
+    pipeline: SkinPipelineParams,
     delay_seconds: int | None = None,
 ) -> Job:
     settings = get_settings()
@@ -212,6 +426,8 @@ def schedule_poll(
             submitted_at,
             queue_prefix,
             poll_number,
+            model_version,
+            pipeline.to_payload(),
         ),
         job_id=job_id,
         job_timeout=settings.job_timeout,
@@ -273,6 +489,7 @@ def schedule_stage_recovery(
     poll_number: int,
     phase: str,
     error: Exception | str,
+    pipeline: SkinPipelineParams,
     state: dict[str, str] | None = None,
     backend_status: str = "processing",
     edited_result: str | None = None,
@@ -317,6 +534,10 @@ def schedule_stage_recovery(
         submitted_at=submitted_at,
         queue_prefix=queue_prefix,
         poll_number=poll_number + 1,
+        model_version=(
+            state.get("model_version") or state.get("pipeline_version")
+        ),
+        pipeline=pipeline,
         delay_seconds=delay,
     )
 
@@ -345,7 +566,32 @@ def real_to_render_job_failure(
     state = load_state(log_id)
     if job.func_name == "tasks.submit_real_to_render":
         queue_prefix = job.args[4] if len(job.args) > 4 else ""
+        model_version = (
+            job.args[5]
+            if len(job.args) > 5
+            else (
+                state.get("model_version") or state.get("pipeline_version")
+            )
+        )
         if provider_task_id:
+            try:
+                model_version, pipeline = resolve_task_pipeline(
+                    model_version,
+                    (
+                        state.get("model_version")
+                        or state.get("pipeline_version")
+                    ),
+                    job.args[6] if len(job.args) > 6 else None,
+                    state.get("pipeline_json"),
+                )
+            except ValueError as exc:
+                fail_stage(
+                    log_id,
+                    exc,
+                    provider_task_id=provider_task_id,
+                    failure_reason="pipeline_parameters_error",
+                )
+                return
             submitted_at = float(
                 state.get("submitted_at") or time.time()
             )
@@ -359,6 +605,8 @@ def real_to_render_job_failure(
                     _state_int(state, "poll_number") + 1,
                     int(time.time()),
                 ),
+                model_version=model_version,
+                pipeline=pipeline,
             )
             report_status(
                 log_id,
@@ -410,6 +658,8 @@ def submit_real_to_render(
     source: str,
     content_type: str = "image/png",
     queue_prefix: str = "",
+    model_version: str | None = None,
+    pipeline: Mapping[str, object] | None = None,
 ) -> None:
     """Submit once, or resume polling when a prior submission was persisted."""
     provider_task_id = None
@@ -417,6 +667,38 @@ def submit_real_to_render(
         settings = get_settings()
 
         existing_state = load_state(log_id)
+        try:
+            model_version, pipeline = resolve_task_pipeline(
+                model_version,
+                (
+                    existing_state.get("model_version")
+                    or existing_state.get("pipeline_version")
+                ),
+                pipeline,
+                existing_state.get("pipeline_json"),
+            )
+        except ValueError as exc:
+            report_model_error(
+                log_id,
+                exc,
+                model_version
+                or existing_state.get("model_version")
+                or existing_state.get("pipeline_version"),
+            )
+            return
+        pipeline_json = json.dumps(
+            pipeline.to_payload(), ensure_ascii=False, sort_keys=True
+        )
+        if (
+            existing_state.get("model_version") != model_version
+            or existing_state.get("pipeline_json") != pipeline_json
+        ):
+            save_state(
+                log_id,
+                model_version=model_version,
+                pipeline_json=pipeline_json,
+            )
+
         terminal_status = existing_state.get("terminal_status")
         if terminal_status:
             logger.info(
@@ -447,6 +729,8 @@ def submit_real_to_render(
                 submitted_at=submitted_at,
                 queue_prefix=queue_prefix,
                 poll_number=next_poll_number,
+                model_version=model_version,
+                pipeline=pipeline,
             )
             logger.warning(
                 "Resumed provider polling for interrupted submission %s",
@@ -493,17 +777,18 @@ def submit_real_to_render(
         with timed_step(
             "prepare_api_request",
             log_id,
-            template_count=len(settings.template_paths),
+            template_count=len(pipeline.template_files),
         ) as timing:
+            prompt_template, template_paths = load_stage1_assets(pipeline)
             references = [
                 image_data_url(source_content, content_type),
-                *template_data_urls(settings.template_paths),
+                *template_data_urls(template_paths),
             ]
             template_refs = "".join(
                 f"[图{index}]"
-                for index in range(2, len(settings.template_paths) + 2)
+                for index in range(2, len(template_paths) + 2)
             )
-            prompt = settings.prompt_template.format(
+            prompt = prompt_template.format(
                 template_refs=template_refs
             )
             timing["image_count"] = len(references)
@@ -520,11 +805,13 @@ def submit_real_to_render(
         )
         try:
             with timed_step("provider_submit_api", log_id) as timing:
-                provider_task_id = provider_client().submit(
+                provider_task_id = provider_client(
+                    pipeline.provider_model
+                ).submit(
                     images=references,
                     prompt=prompt,
-                    aspect_ratio=settings.aspect_ratio,
-                    image_size=settings.image_size,
+                    aspect_ratio=pipeline.aspect_ratio,
+                    image_size=pipeline.image_size,
                 )
                 timing["provider_task_id"] = provider_task_id
         except requests.HTTPError as exc:
@@ -594,6 +881,8 @@ def submit_real_to_render(
             submitted_at=submitted_at,
             queue_prefix=queue_prefix,
             poll_number=1,
+            model_version=model_version,
+            pipeline=pipeline,
         )
     except Exception as exc:
         traceback.print_exc()
@@ -609,10 +898,28 @@ def resume_real_to_render(
     content_type: str,
     queue_prefix: str,
     provider_task_id: str,
+    model_version: str | None = None,
+    pipeline: Mapping[str, object] | None = None,
 ) -> None:
     """Recover an accepted provider task without ever resubmitting it."""
     del source, content_type
     state = load_state(log_id)
+    try:
+        model_version, pipeline = resolve_task_pipeline(
+            model_version,
+            state.get("model_version") or state.get("pipeline_version"),
+            pipeline,
+            state.get("pipeline_json"),
+        )
+    except ValueError as exc:
+        report_model_error(
+            log_id,
+            exc,
+            model_version
+            or state.get("model_version")
+            or state.get("pipeline_version"),
+        )
+        return
     if state.get("terminal_status"):
         return
     submitted_at = float(state.get("submitted_at") or time.time())
@@ -625,6 +932,10 @@ def resume_real_to_render(
         submission_state="accepted",
         provider_task_id=provider_task_id,
         submitted_at=submitted_at,
+        model_version=model_version,
+        pipeline_json=json.dumps(
+            pipeline.to_payload(), ensure_ascii=False, sort_keys=True
+        ),
     )
     report_status(
         log_id,
@@ -641,6 +952,8 @@ def resume_real_to_render(
         submitted_at=submitted_at,
         queue_prefix=queue_prefix,
         poll_number=poll_number,
+        model_version=model_version,
+        pipeline=pipeline,
     )
 
 
@@ -649,6 +962,9 @@ def enqueue_render_to_uv_once(
     is_public: bool,
     intermediate_key: str,
     queue_prefix: str,
+    model_version: str,
+    dense_uv_checkpoint_file: str,
+    DMR_mappings_dir: str,
 ) -> Job:
     settings = get_settings()
     connection = redis_connection()
@@ -669,7 +985,9 @@ def enqueue_render_to_uv_once(
             is_public,
             intermediate_key,
             "image/png",
-            settings.pipeline_version,
+            model_version,
+            dense_uv_checkpoint_file,
+            DMR_mappings_dir,
         ),
         job_id=job_id,
         job_timeout=settings.render_to_uv_job_timeout,
@@ -689,10 +1007,45 @@ def poll_real_to_render(
     submitted_at: float,
     queue_prefix: str = "",
     poll_number: int = 1,
+    model_version: str | None = None,
+    pipeline: Mapping[str, object] | None = None,
 ) -> None:
     """Advance one recoverable stage without resubmitting the provider job."""
     settings = get_settings()
     state = load_state(log_id)
+    try:
+        model_version, pipeline = resolve_task_pipeline(
+            model_version,
+            state.get("model_version") or state.get("pipeline_version"),
+            pipeline,
+            state.get("pipeline_json"),
+        )
+    except ValueError as exc:
+        report_model_error(
+            log_id,
+            exc,
+            model_version
+            or state.get("model_version")
+            or state.get("pipeline_version"),
+        )
+        return
+    pipeline_json = json.dumps(
+        pipeline.to_payload(), ensure_ascii=False, sort_keys=True
+    )
+    if (
+        state.get("model_version") != model_version
+        or state.get("pipeline_json") != pipeline_json
+    ):
+        save_state(
+            log_id,
+            model_version=model_version,
+            pipeline_json=pipeline_json,
+        )
+        state = {
+            **state,
+            "model_version": model_version,
+            "pipeline_json": pipeline_json,
+        }
     if state.get("terminal_status"):
         return
 
@@ -713,7 +1066,9 @@ def poll_real_to_render(
                     provider_task_id=provider_task_id,
                     poll_number=poll_number,
                 ) as timing:
-                    status = provider_client().get_status(provider_task_id)
+                    status = provider_client(
+                        pipeline.provider_model
+                    ).get_status(provider_task_id)
                     timing["provider_status"] = status.status
                     timing["provider_progress"] = status.progress
             except Exception as exc:
@@ -727,6 +1082,7 @@ def poll_real_to_render(
                     poll_number=poll_number,
                     phase="provider_status_api",
                     error=exc,
+                    pipeline=pipeline,
                     state=state,
                 )
                 return
@@ -781,6 +1137,8 @@ def poll_real_to_render(
                     submitted_at=submitted_at,
                     queue_prefix=queue_prefix,
                     poll_number=poll_number + 1,
+                    model_version=model_version,
+                    pipeline=pipeline,
                     delay_seconds=(
                         settings.delayed_poll_interval
                         if delayed
@@ -836,7 +1194,9 @@ def poll_real_to_render(
                 log_id,
                 provider_task_id=provider_task_id,
             ) as timing:
-                raw_result = provider_client().download_result(result_url)
+                raw_result = provider_client(
+                    pipeline.provider_model
+                ).download_result(result_url)
                 timing["size_mb"] = size_mb(len(raw_result))
         except Exception as exc:
             traceback.print_exc()
@@ -868,6 +1228,7 @@ def poll_real_to_render(
                 poll_number=poll_number,
                 phase="provider_result_download",
                 error=exc,
+                pipeline=pipeline,
                 state=state,
             )
             return
@@ -912,6 +1273,7 @@ def poll_real_to_render(
                 poll_number=poll_number,
                 phase="normalize_render",
                 error=exc,
+                pipeline=pipeline,
                 state=state,
             )
             return
@@ -940,6 +1302,7 @@ def poll_real_to_render(
                 poll_number=poll_number,
                 phase="s3_upload",
                 error=exc,
+                pipeline=pipeline,
                 state=state,
             )
             return
@@ -967,6 +1330,11 @@ def poll_real_to_render(
                 is_public=is_public,
                 intermediate_key=intermediate_key,
                 queue_prefix=queue_prefix,
+                model_version=model_version,
+                dense_uv_checkpoint_file=(
+                    pipeline.dense_uv_checkpoint_file
+                ),
+                DMR_mappings_dir=pipeline.DMR_mappings_dir,
             )
     except Exception as exc:
         traceback.print_exc()
@@ -979,6 +1347,7 @@ def poll_real_to_render(
             poll_number=poll_number,
             phase="enqueue_render_to_uv",
             error=exc,
+            pipeline=pipeline,
             state=state,
             backend_status="pending_skin",
             edited_result=intermediate_key,

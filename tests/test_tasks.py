@@ -12,6 +12,22 @@ from images import InvalidShapeError
 from provider import ProviderStatus
 
 
+MODEL_VERSION = "SKING_DDJ_v54"
+PIPELINE_PAYLOAD = {
+    "prompt_file": "real_to_render.zh-hans.txt",
+    "template_files": [
+        "template41.png",
+        "template51.png",
+        "template52.png",
+    ],
+    "provider_model": "nano-banana-pro",
+    "image_size": "1K",
+    "aspect_ratio": "1:1",
+    "dense_uv_checkpoint_file": "SKING_DDJ_v54.pt",
+    "DMR_mappings_dir": "mappings_256x512",
+}
+
+
 class FailedProvider:
     def get_status(self, task_id):
         return ProviderStatus(
@@ -144,7 +160,7 @@ def test_provider_failure_does_not_schedule_another_poll(monkeypatch):
         poll_settings,
     )
     monkeypatch.setattr(tasks, "load_state", lambda log_id: {})
-    monkeypatch.setattr(tasks, "provider_client", lambda: FailedProvider())
+    monkeypatch.setattr(tasks, "provider_client", lambda model: FailedProvider())
     monkeypatch.setattr(tasks, "save_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         tasks,
@@ -163,6 +179,8 @@ def test_provider_failure_does_not_schedule_another_poll(monkeypatch):
         True,
         "provider-1",
         submitted_at=0.0,
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert len(failures) == 1
@@ -175,7 +193,11 @@ def test_provider_violation_stops_without_retrying(monkeypatch):
     scheduled = []
     monkeypatch.setattr(tasks, "get_settings", poll_settings)
     monkeypatch.setattr(tasks, "load_state", lambda log_id: {})
-    monkeypatch.setattr(tasks, "provider_client", lambda: ViolationProvider())
+    monkeypatch.setattr(
+        tasks,
+        "provider_client",
+        lambda model: ViolationProvider(),
+    )
     monkeypatch.setattr(tasks, "save_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         tasks,
@@ -194,6 +216,8 @@ def test_provider_violation_stops_without_retrying(monkeypatch):
         True,
         "provider-violation",
         submitted_at=0.0,
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert len(failures) == 1
@@ -218,7 +242,7 @@ def test_hard_stage_timeout_fails_only_after_provider_still_reports_running(
     monkeypatch.setattr(
         tasks,
         "provider_client",
-        lambda: RunningProvider(),
+        lambda model: RunningProvider(),
     )
     monkeypatch.setattr(
         tasks,
@@ -239,6 +263,8 @@ def test_hard_stage_timeout_fails_only_after_provider_still_reports_running(
         False,
         "provider-2",
         submitted_at=0.0,
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert len(failures) == 1
@@ -253,7 +279,11 @@ def test_invalid_shape_fails_before_upload_and_handoff(monkeypatch):
         poll_settings,
     )
     monkeypatch.setattr(tasks, "load_state", lambda log_id: {})
-    monkeypatch.setattr(tasks, "provider_client", lambda: SucceededProvider())
+    monkeypatch.setattr(
+        tasks,
+        "provider_client",
+        lambda model: SucceededProvider(),
+    )
     monkeypatch.setattr(tasks, "save_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         tasks,
@@ -286,6 +316,8 @@ def test_invalid_shape_fails_before_upload_and_handoff(monkeypatch):
         True,
         "provider-invalid-shape",
         submitted_at=0.0,
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert len(failures) == 1
@@ -298,7 +330,11 @@ def test_soft_timeout_keeps_polling_at_slower_interval(monkeypatch):
     failures = []
     monkeypatch.setattr(tasks, "get_settings", poll_settings)
     monkeypatch.setattr(tasks, "load_state", lambda log_id: {})
-    monkeypatch.setattr(tasks, "provider_client", lambda: RunningProvider())
+    monkeypatch.setattr(
+        tasks,
+        "provider_client",
+        lambda model: RunningProvider(),
+    )
     monkeypatch.setattr(tasks, "save_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(tasks, "report_status", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -318,6 +354,8 @@ def test_soft_timeout_keeps_polling_at_slower_interval(monkeypatch):
         True,
         "provider-delayed",
         submitted_at=0.0,
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert failures == []
@@ -333,7 +371,7 @@ def test_result_download_timeout_is_retried_without_failing(monkeypatch):
     monkeypatch.setattr(
         tasks,
         "provider_client",
-        lambda: DownloadTimeoutProvider(),
+        lambda model: DownloadTimeoutProvider(),
     )
     monkeypatch.setattr(tasks, "save_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(
@@ -358,6 +396,8 @@ def test_result_download_timeout_is_retried_without_failing(monkeypatch):
         True,
         "provider-download-retry",
         submitted_at=0.0,
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert failures == []
@@ -388,7 +428,7 @@ def test_result_url_refresh_preserves_original_recovery_deadline(monkeypatch):
     monkeypatch.setattr(
         tasks,
         "provider_client",
-        lambda: ExpiredResultProvider(),
+        lambda model: ExpiredResultProvider(),
     )
     monkeypatch.setattr(
         tasks,
@@ -415,6 +455,8 @@ def test_result_url_refresh_preserves_original_recovery_deadline(monkeypatch):
         True,
         "provider-result-refresh",
         submitted_at=0.0,
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     succeeded_update = next(
@@ -465,6 +507,8 @@ def test_handoff_failure_keeps_pending_skin_and_retries(monkeypatch):
         False,
         "provider-handoff",
         submitted_at=0.0,
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert reports[0][0][1] == "pending_skin"
@@ -509,10 +553,14 @@ def test_poll_job_uses_configured_hard_timeout(monkeypatch):
         submitted_at=0.0,
         queue_prefix="",
         poll_number=1,
+        model_version=MODEL_VERSION,
+        pipeline=tasks.SkinPipelineParams.from_payload(PIPELINE_PAYLOAD),
     )
 
     assert captured["name"] == "queue_real_to_render"
     assert captured["task"] == "tasks.poll_real_to_render"
+    assert captured["args"][-2] == MODEL_VERSION
+    assert captured["args"][-1] == PIPELINE_PAYLOAD
     assert captured["job_timeout"] == 320
     assert captured["retry"].max == 5
 
@@ -534,7 +582,6 @@ def test_render_to_uv_handoff_has_bounded_rq_retry(monkeypatch):
         "get_settings",
         lambda: SimpleNamespace(
             render_to_uv_task="worker_tasks.task_render_to_uv",
-            pipeline_version="pipeline-v1",
             render_to_uv_job_timeout=120,
             render_to_uv_retry_max=5,
             render_to_uv_retry_intervals=(5, 15, 30, 60, 120),
@@ -553,9 +600,17 @@ def test_render_to_uv_handoff_has_bounded_rq_retry(monkeypatch):
         is_public=True,
         intermediate_key="real_to_render_intermediate/log-gpu-retry.png",
         queue_prefix="",
+        model_version=MODEL_VERSION,
+        dense_uv_checkpoint_file="SKING_DDJ_v54.pt",
+        DMR_mappings_dir="mappings_256x512",
     )
 
     assert captured["name"] == "queue_render_to_uv"
+    assert captured["args"][-3:] == (
+        MODEL_VERSION,
+        "SKING_DDJ_v54.pt",
+        "mappings_256x512",
+    )
     assert captured["retry"].max == 5
     assert captured["retry"].intervals == [5, 15, 30, 60, 120]
 
@@ -582,6 +637,7 @@ def test_interrupted_submit_resumes_existing_provider_task(monkeypatch):
         "schedule_poll",
         lambda **kwargs: scheduled.append(kwargs),
     )
+    monkeypatch.setattr(tasks, "save_state", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         tasks,
         "report_status",
@@ -590,14 +646,14 @@ def test_interrupted_submit_resumes_existing_provider_task(monkeypatch):
     monkeypatch.setattr(
         tasks,
         "object_storage",
-        lambda: (_ for _ in ()).throw(
+        lambda model: (_ for _ in ()).throw(
             AssertionError("resumed submit must not download from S3")
         ),
     )
     monkeypatch.setattr(
         tasks,
         "provider_client",
-        lambda: (_ for _ in ()).throw(
+        lambda model: (_ for _ in ()).throw(
             AssertionError("resumed submit must not call provider submit")
         ),
     )
@@ -608,6 +664,8 @@ def test_interrupted_submit_resumes_existing_provider_task(monkeypatch):
         "uploads/log-resume.png",
         "image/png",
         "high_",
+        MODEL_VERSION,
+        PIPELINE_PAYLOAD,
     )
 
     assert scheduled == [
@@ -618,6 +676,10 @@ def test_interrupted_submit_resumes_existing_provider_task(monkeypatch):
             "submitted_at": 100.0,
             "queue_prefix": "high_",
             "poll_number": 4,
+            "model_version": MODEL_VERSION,
+            "pipeline": tasks.SkinPipelineParams.from_payload(
+                PIPELINE_PAYLOAD
+            ),
         }
     ]
     assert reports[-1][1]["provider_task_id"] == "provider-existing"
@@ -642,17 +704,22 @@ def test_submit_read_timeout_is_marked_unknown_without_resubmission(
         tasks,
         "get_settings",
         lambda: SimpleNamespace(
-            template_paths=(),
-            prompt_template="{template_refs}",
-            aspect_ratio="1:1",
-            image_size="1K",
         ),
     )
     monkeypatch.setattr(tasks, "load_state", lambda log_id: {})
     monkeypatch.setattr(tasks, "object_storage", lambda: FakeStorage())
     monkeypatch.setattr(tasks, "image_data_url", lambda *args: "source")
     monkeypatch.setattr(tasks, "template_data_urls", lambda paths: [])
-    monkeypatch.setattr(tasks, "provider_client", lambda: TimeoutProvider())
+    monkeypatch.setattr(
+        tasks,
+        "load_stage1_assets",
+        lambda pipeline: ("prompt", ()),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "provider_client",
+        lambda model: TimeoutProvider(),
+    )
     monkeypatch.setattr(
         tasks,
         "save_state",
@@ -673,6 +740,8 @@ def test_submit_read_timeout_is_marked_unknown_without_resubmission(
         "log-submit-timeout",
         True,
         "uploads/log-submit-timeout.png",
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert failures == []
@@ -691,7 +760,11 @@ def test_uncertain_submit_is_never_resubmitted(
     submission_state,
 ):
     reports = []
-    monkeypatch.setattr(tasks, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        tasks,
+        "get_settings",
+        lambda: SimpleNamespace(),
+    )
     monkeypatch.setattr(
         tasks,
         "load_state",
@@ -706,7 +779,7 @@ def test_uncertain_submit_is_never_resubmitted(
     monkeypatch.setattr(
         tasks,
         "provider_client",
-        lambda: (_ for _ in ()).throw(
+        lambda model: (_ for _ in ()).throw(
             AssertionError("uncertain submission must not be repeated")
         ),
     )
@@ -715,7 +788,53 @@ def test_uncertain_submit_is_never_resubmitted(
         "log-unknown",
         True,
         "uploads/log-unknown.png",
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
     )
 
     assert reports[-1][1]["provider_submission_state"] == "unknown"
     assert reports[-1][1]["requires_reconciliation"] is True
+
+
+def test_submit_rejects_model_change_before_provider_call(monkeypatch):
+    reports = []
+    monkeypatch.setattr(tasks, "get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr(
+        tasks,
+        "load_state",
+        lambda log_id: {"model_version": "SKING_DDJ_v55"},
+    )
+    monkeypatch.setattr(
+        tasks,
+        "report_status",
+        lambda *args, **kwargs: reports.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "object_storage",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("mismatched pipeline must not access the source")
+        ),
+    )
+
+    tasks.submit_real_to_render(
+        "log-pipeline-mismatch",
+        True,
+        "uploads/log-pipeline-mismatch.png",
+        model_version=MODEL_VERSION,
+        pipeline=PIPELINE_PAYLOAD,
+    )
+
+    assert reports == [
+        (
+            ("log-pipeline-mismatch", "failed"),
+            {
+                "model_version": MODEL_VERSION,
+                "error_origin": "model_pipeline_error",
+                "error_msg": (
+                    "Real-to-render model version changed within one task: "
+                    "task='SKING_DDJ_v54', state='SKING_DDJ_v55'"
+                ),
+            },
+        )
+    ]
