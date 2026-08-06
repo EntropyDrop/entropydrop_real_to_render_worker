@@ -536,9 +536,7 @@ def schedule_stage_recovery(
         submitted_at=submitted_at,
         queue_prefix=queue_prefix,
         poll_number=poll_number + 1,
-        model_version=(
-            state.get("model_version") or state.get("pipeline_version")
-        ),
+        model_version=state.get("model_version"),
         pipeline=pipeline,
         delay_seconds=delay,
     )
@@ -571,18 +569,13 @@ def real_to_render_job_failure(
         model_version = (
             job.args[5]
             if len(job.args) > 5
-            else (
-                state.get("model_version") or state.get("pipeline_version")
-            )
+            else state.get("model_version")
         )
         if provider_task_id:
             try:
                 model_version, pipeline = resolve_task_pipeline(
                     model_version,
-                    (
-                        state.get("model_version")
-                        or state.get("pipeline_version")
-                    ),
+                    state.get("model_version"),
                     job.args[6] if len(job.args) > 6 else None,
                     state.get("pipeline_json"),
                 )
@@ -672,10 +665,7 @@ def submit_real_to_render(
         try:
             model_version, pipeline = resolve_task_pipeline(
                 model_version,
-                (
-                    existing_state.get("model_version")
-                    or existing_state.get("pipeline_version")
-                ),
+                existing_state.get("model_version"),
                 pipeline,
                 existing_state.get("pipeline_json"),
             )
@@ -683,9 +673,7 @@ def submit_real_to_render(
             report_model_error(
                 log_id,
                 exc,
-                model_version
-                or existing_state.get("model_version")
-                or existing_state.get("pipeline_version"),
+                model_version or existing_state.get("model_version"),
             )
             return
         pipeline_json = json.dumps(
@@ -909,7 +897,7 @@ def resume_real_to_render(
     try:
         model_version, pipeline = resolve_task_pipeline(
             model_version,
-            state.get("model_version") or state.get("pipeline_version"),
+            state.get("model_version"),
             pipeline,
             state.get("pipeline_json"),
         )
@@ -917,9 +905,7 @@ def resume_real_to_render(
         report_model_error(
             log_id,
             exc,
-            model_version
-            or state.get("model_version")
-            or state.get("pipeline_version"),
+            model_version or state.get("model_version"),
         )
         return
     if state.get("terminal_status"):
@@ -1018,7 +1004,7 @@ def poll_real_to_render(
     try:
         model_version, pipeline = resolve_task_pipeline(
             model_version,
-            state.get("model_version") or state.get("pipeline_version"),
+            state.get("model_version"),
             pipeline,
             state.get("pipeline_json"),
         )
@@ -1026,9 +1012,7 @@ def poll_real_to_render(
         report_model_error(
             log_id,
             exc,
-            model_version
-            or state.get("model_version")
-            or state.get("pipeline_version"),
+            model_version or state.get("model_version"),
         )
         return
     pipeline_json = json.dumps(
