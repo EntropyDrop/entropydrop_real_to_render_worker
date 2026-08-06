@@ -260,6 +260,8 @@ def state_key(log_id: str) -> str:
 def report_status(log_id: str, status: str, **fields) -> None:
     settings = get_settings()
     connection = redis_connection()
+    if fields.get("provider_submission_state") == "unknown":
+        status = "failed"
     payload = {
         "log_id": log_id,
         "status": status,
@@ -626,7 +628,7 @@ def real_to_render_job_failure(
             )
             report_status(
                 log_id,
-                "processing",
+                "failed",
                 provider_submission_state="unknown",
                 retrying=False,
                 requires_reconciliation=True,
@@ -749,7 +751,7 @@ def submit_real_to_render(
             )
             report_status(
                 log_id,
-                "processing",
+                "failed",
                 provider_submission_state="unknown",
                 retrying=False,
                 requires_reconciliation=True,
@@ -832,7 +834,7 @@ def submit_real_to_render(
             )
             report_status(
                 log_id,
-                "processing",
+                "failed",
                 provider_submission_state="unknown",
                 retrying=False,
                 requires_reconciliation=True,
@@ -850,7 +852,7 @@ def submit_real_to_render(
             )
             report_status(
                 log_id,
-                "processing",
+                "failed",
                 provider_submission_state="unknown",
                 retrying=False,
                 requires_reconciliation=True,
