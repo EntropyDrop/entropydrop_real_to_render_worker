@@ -12,7 +12,7 @@ from images import InvalidShapeError
 from provider import ProviderStatus
 
 
-MODEL_VERSION = "SKING_DDJ_v54"
+MODEL_VERSION = "SKING_DDJ_v66"
 PIPELINE_PAYLOAD = {
     "prompt_file": "real_to_render.zh-hans.txt",
     "template_files": [
@@ -23,7 +23,7 @@ PIPELINE_PAYLOAD = {
     "provider_model": "nano-banana-pro",
     "image_size": "1K",
     "aspect_ratio": "1:1",
-    "dense_uv_checkpoint_file": "SKING_DDJ_v54.pt",
+    "dense_uv_checkpoint_file": "SKING_DDJ_v66.pt",
     "DMR_mappings_dir": "mappings_256x512",
 }
 
@@ -601,14 +601,14 @@ def test_render_to_uv_handoff_has_bounded_rq_retry(monkeypatch):
         intermediate_key="real_to_render_intermediate/log-gpu-retry.png",
         queue_prefix="",
         model_version=MODEL_VERSION,
-        dense_uv_checkpoint_file="SKING_DDJ_v54.pt",
+        dense_uv_checkpoint_file="SKING_DDJ_v66.pt",
         DMR_mappings_dir="mappings_256x512",
     )
 
     assert captured["name"] == "queue_render_to_uv"
     assert captured["args"][-3:] == (
         MODEL_VERSION,
-        "SKING_DDJ_v54.pt",
+        "SKING_DDJ_v66.pt",
         "mappings_256x512",
     )
     assert captured["retry"].max == 5
@@ -802,7 +802,7 @@ def test_submit_rejects_model_change_before_provider_call(monkeypatch):
     monkeypatch.setattr(
         tasks,
         "load_state",
-        lambda log_id: {"model_version": "SKING_DDJ_v55"},
+        lambda log_id: {"model_version": "SKING_DDJ_v67"},
     )
     monkeypatch.setattr(
         tasks,
@@ -833,7 +833,7 @@ def test_submit_rejects_model_change_before_provider_call(monkeypatch):
                 "error_origin": "model_pipeline_error",
                 "error_msg": (
                     "Real-to-render model version changed within one task: "
-                    "task='SKING_DDJ_v54', state='SKING_DDJ_v55'"
+                    "task='SKING_DDJ_v66', state='SKING_DDJ_v67'"
                 ),
             },
         )
