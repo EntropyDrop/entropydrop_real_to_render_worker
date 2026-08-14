@@ -494,7 +494,7 @@ def schedule_stage_recovery(
     pipeline: SkinPipelineParams,
     state: dict[str, str] | None = None,
     backend_status: str = "processing",
-    edited_result: str | None = None,
+    image_to_skin_edited_result: str | None = None,
 ) -> Job:
     """Persist a transient failure and schedule a safe, idempotent retry."""
     settings = get_settings()
@@ -522,7 +522,7 @@ def schedule_stage_recovery(
         log_id,
         backend_status,
         provider_task_id=provider_task_id,
-        edited_result=edited_result,
+        image_to_skin_edited_result=image_to_skin_edited_result,
         retrying=True,
         error_origin=phase,
         retry_attempt=attempt,
@@ -1307,7 +1307,7 @@ def poll_real_to_render(
         "pending_skin",
         provider_task_id=provider_task_id,
         provider_submission_state="accepted",
-        edited_result=intermediate_key,
+        image_to_skin_edited_result=intermediate_key,
     )
     try:
         with timed_step("enqueue_render_to_uv", log_id):
@@ -1336,7 +1336,7 @@ def poll_real_to_render(
             pipeline=pipeline,
             state=state,
             backend_status="pending_skin",
-            edited_result=intermediate_key,
+            image_to_skin_edited_result=intermediate_key,
         )
         return
 

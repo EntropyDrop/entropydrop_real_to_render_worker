@@ -197,7 +197,7 @@ q_real_to_render.enqueue(
 
 The new model must use `recoverable=False`. The backend should retain the
 original upload in `source`; this worker reports the normalized render in
-`edited_result`.
+`image_to_skin_edited_result`.
 
 The GPU worker sample contract is:
 

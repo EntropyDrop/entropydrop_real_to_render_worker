@@ -512,7 +512,15 @@ def test_handoff_failure_keeps_pending_skin_and_retries(monkeypatch):
     )
 
     assert reports[0][0][1] == "pending_skin"
+    assert reports[0][1]["image_to_skin_edited_result"] == (
+        "real_to_render_intermediate/log-handoff.png"
+    )
+    assert "edited_result" not in reports[0][1]
     assert reports[-1][0][1] == "pending_skin"
+    assert reports[-1][1]["image_to_skin_edited_result"] == (
+        "real_to_render_intermediate/log-handoff.png"
+    )
+    assert "edited_result" not in reports[-1][1]
     assert reports[-1][1]["error_origin"] == "enqueue_render_to_uv"
     assert scheduled[-1]["delay_seconds"] == 2
 
