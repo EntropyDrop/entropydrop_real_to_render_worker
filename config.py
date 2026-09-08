@@ -156,7 +156,7 @@ def get_settings() -> Settings:
             "RENDER_TO_UV_TASK", "worker_tasks.task_render_to_uv"
         ),
         render_to_uv_job_timeout=_positive_int(
-            "RENDER_TO_UV_JOB_TIMEOUT_SECONDS", 120
+            "RENDER_TO_UV_JOB_TIMEOUT_SECONDS", 600
         ),
         render_to_uv_retry_max=_positive_int(
             "RENDER_TO_UV_RETRY_MAX", 5
